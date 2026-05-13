@@ -114,11 +114,14 @@ async function scrapeCountry(page, country, idx, total) {
   try {
     await page.goto(country.englishUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-    // Wait for plan cards
+    // Wait until plan cards exist AND have actual content (React hydration takes a moment)
     try {
-      await page.waitForSelector('[data-testid^="destination-hero-plan-card-"]', { timeout: 10000 });
+      await page.waitForFunction(() => {
+        const card = document.querySelector('[data-testid^="destination-hero-plan-card-"]');
+        return card && (card.innerText || '').includes('GB');
+      }, { timeout: 15000 });
     } catch {
-      console.error(`[Saily] [${idx}/${total}] ${country.countryName} — no plan cards`);
+      console.error(`[Saily] [${idx}/${total}] ${country.countryName} — no plan content`);
       return [];
     }
 
