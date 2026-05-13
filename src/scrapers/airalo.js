@@ -1,14 +1,31 @@
 /**
  * Airalo scraper (airalo.com)
- * Strategy: extract __NEXT_DATA__ from country pages (Next.js SSR).
- * Falls back to capturing XHR responses if __NEXT_DATA__ is empty.
+ *
+ * Strategy:
+ *  1. Fetch the country list from the Airalo public API (no browser needed).
+ *  2. For each country, open its [slug]-esim page with Playwright.
+ *  3. Wait for the package buttons to appear in the DOM.
+ *  4. Extract duration groups + button text via page.evaluate (sync — no async inside).
+ *  5. Convert prices to EUR/USD outside evaluate (toEurUsd is async).
+ *  6. Process countries 4 at a time (Promise.all over chunks of 4).
  */
+
+const axios = require('axios');
 const { chromium } = require('playwright');
 const { toEurUsd } = require('../currency');
 
 const BASE_URL = 'https://www.airalo.com';
+const COUNTRIES_API = 'https://www.airalo.com/api/v4/countries';
+const CONCURRENCY = 4;
+
+// ─── Main export ─────────────────────────────────────────────────────────────
 
 async function scrape() {
+  // Step 1: fetch country list (plain HTTP — fast, no browser)
+  console.error('[Airalo] Fetching country list from API...');
+  const countries = await fetchCountryList();
+  console.error(`[Airalo] ${countries.length} countries to scrape`);
+
   const browser = await chromium.launch({
     headless: true,
     args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
@@ -26,82 +43,24 @@ async function scrape() {
       extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
     });
 
-    const page = await context.newPage();
+    // Process in chunks of CONCURRENCY (4 parallel pages)
+    for (let i = 0; i < countries.length; i += CONCURRENCY) {
+      const chunk = countries.slice(i, i + CONCURRENCY);
 
-    // Step 1: get country list from the deals / home page
-    console.error('[Airalo] Loading country list...');
-    const capturedJson = [];
-    page.on('response', async (res) => {
-      const ct = res.headers()['content-type'] || '';
-      if (res.status() === 200 && ct.includes('json')) {
-        try {
-          const text = await res.text();
-          if (text.length > 500) {
-            console.error(`[Airalo] XHR: ${res.url().substring(0, 100)} (${text.length}b)`);
-            capturedJson.push({ url: res.url(), text });
-          }
-        } catch (_) {}
-      }
-    });
-
-    await page.goto(`${BASE_URL}/esim-deals`, { waitUntil: 'networkidle', timeout: 60000 });
-    await page.waitForTimeout(3000);
-
-    // Extract __NEXT_DATA__ for the listing page (may contain country list)
-    const listingNextData = await extractNextData(page);
-    if (listingNextData) {
-      console.error('[Airalo] Got __NEXT_DATA__ from deals page');
-      const plans = deepSearchPlans(listingNextData, 'airalo');
-      addUnique(allPlans, seen, plans);
-    }
-
-    // Also try XHR responses from listing page
-    for (const { url, text } of capturedJson) {
-      try {
-        const plans = deepSearchPlans(JSON.parse(text), 'airalo');
-        if (plans.length > 0) console.error(`[Airalo] ${plans.length} plans from XHR: ${url.substring(0, 80)}`);
-        addUnique(allPlans, seen, plans);
-      } catch (_) {}
-    }
-
-    // Step 2: collect country page links
-    const countryLinks = await page.$$eval(
-      'a[href*="-esim"]',
-      (els, base) =>
-        [...new Set(
-          els
-            .map((el) => el.href)
-            .filter((h) => h.startsWith(base) && !h.includes('/global') && !h.includes('/deals') && !h.includes('/store') && h !== base + '/' && h !== base)
-        )],
-      BASE_URL
-    );
-    console.error(`[Airalo] Found ${countryLinks.length} country links`);
-
-    // Step 3: visit each country page and extract __NEXT_DATA__
-    for (const href of countryLinks) {
-      capturedJson.length = 0;
-      try {
-        await page.goto(href, { waitUntil: 'networkidle', timeout: 40000 });
-        await page.waitForTimeout(1500);
-
-        const nd = await extractNextData(page);
-        if (nd) {
-          const plans = deepSearchPlans(nd, 'airalo');
-          if (plans.length > 0) {
-            console.error(`[Airalo] ${plans.length} plans from ${href.split('/').pop()}`);
-            addUnique(allPlans, seen, plans);
-          }
-        }
-
-        // Also check XHR
-        for (const { text } of capturedJson) {
+      const chunkResults = await Promise.all(
+        chunk.map(async (c, j) => {
+          const idx = i + j + 1;
+          const page = await context.newPage();
           try {
-            const plans = deepSearchPlans(JSON.parse(text), 'airalo');
-            addUnique(allPlans, seen, plans);
-          } catch (_) {}
-        }
-      } catch (err) {
-        console.error(`[Airalo] Error on ${href}: ${err.message}`);
+            return await scrapeCountryPage(page, c, idx, countries.length);
+          } finally {
+            await page.close();
+          }
+        })
+      );
+
+      for (const plans of chunkResults) {
+        addUnique(allPlans, seen, plans);
       }
     }
   } finally {
@@ -112,113 +71,142 @@ async function scrape() {
   return allPlans;
 }
 
-async function extractNextData(page) {
+// ─── Country list ─────────────────────────────────────────────────────────────
+
+async function fetchCountryList() {
   try {
-    const raw = await page.$eval('#__NEXT_DATA__', (el) => el.textContent);
-    return JSON.parse(raw);
-  } catch (_) {
-    return null;
+    const { data } = await axios.get(COUNTRIES_API, {
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'Mozilla/5.0 (compatible; esim-price-tracker/1.0)',
+      },
+      timeout: 30000,
+    });
+
+    // API returns { data: [ {id, slug, title}, ... ] } or a bare array
+    const list = Array.isArray(data) ? data : (data?.data ?? []);
+    return list.filter((c) => c.slug && c.title);
+  } catch (err) {
+    console.error(`[Airalo] Country API error: ${err.message}`);
+    // Minimal fallback so we still get some data
+    return [{ slug: 'france', title: 'France', id: 'fr' }];
   }
 }
+
+// ─── Per-country page scraping ────────────────────────────────────────────────
+
+async function scrapeCountryPage(page, country, idx, total) {
+  const url = `${BASE_URL}/${country.slug}-esim`;
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+    // Wait up to 12 s for the package buttons to appear
+    const rawPlans = await extractPackagesFromPage(page, country.title, country.slug);
+
+    if (rawPlans.length === 0) {
+      console.error(`[Airalo] [${idx}/${total}] ${country.title} — 0 plans (no buttons found)`);
+      return [];
+    }
+
+    // Convert prices outside page.evaluate (toEurUsd is async)
+    const plans = await Promise.all(
+      rawPlans.map(async (raw) => {
+        const { price_eur, price_usd } = await toEurUsd(raw.price, raw.currency);
+        return {
+          provider: 'airalo',
+          country: country.title,
+          country_code: String(country.slug || '').toUpperCase().slice(0, 3),
+          region: country.region || '',
+          plan_name: `${raw.dataGb === null ? 'Unlimited' : raw.dataGb + 'GB'} / ${raw.validityDays}d`,
+          data_gb: raw.dataGb,
+          plan_type: raw.dataGb === null ? 'unlimited' : 'data',
+          validity_days: raw.validityDays,
+          price_eur,
+          price_usd,
+        };
+      })
+    );
+
+    console.error(`[Airalo] [${idx}/${total}] ${country.title} — ${plans.length} plans`);
+    return plans;
+  } catch (err) {
+    console.error(`[Airalo] [${idx}/${total}] ${country.title} error: ${err.message}`);
+    return [];
+  }
+}
+
+// ─── DOM extraction (runs inside page.evaluate — must be synchronous) ─────────
 
 /**
- * Recursively search any JSON blob for arrays that look like eSIM plan lists.
- * Airalo's __NEXT_DATA__ nests packages under props.pageProps or React Query cache.
+ * Wait for package buttons, then extract raw plan data from the DOM.
+ * Returns an array of { dataGb, price, currency, validityDays }.
+ * All heavy lifting (currency conversion, normalization) happens outside.
  */
-function deepSearchPlans(obj, provider, depth = 0, results = []) {
-  if (depth > 20 || !obj) return results;
-
-  if (Array.isArray(obj) && obj.length > 0 && obj.length < 2000) {
-    const sample = obj[0];
-    if (sample && typeof sample === 'object' && looksLikePlan(sample)) {
-      const plans = obj.map((item) => normalizePlan(item, provider)).filter(Boolean);
-      if (plans.length > 0) results.push(...plans);
-      return results;
-    }
+async function extractPackagesFromPage(page, countryName, countrySlug) {
+  try {
+    await page.waitForSelector(
+      '[data-testid="package-grouped-packages_package-button"]',
+      { timeout: 12000 }
+    );
+  } catch {
+    // Buttons never appeared — page may be geo-blocked or empty
+    return [];
   }
 
-  if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-    for (const v of Object.values(obj)) {
-      deepSearchPlans(v, provider, depth + 1, results);
+  // page.evaluate runs synchronously in the browser context
+  return page.evaluate(() => {
+    const plans = [];
+
+    /**
+     * Find all "duration group" containers.
+     * Each group is a DIV whose text starts with "N days" and that contains
+     * at least one package button.
+     *
+     * Strategy: find all buttons first, then walk up to their parent container
+     * that also holds a "N days" text node, so we don't depend on a specific
+     * class name that can change.
+     */
+    const buttons = [
+      ...document.querySelectorAll('[data-testid="package-grouped-packages_package-button"]'),
+    ];
+
+    for (const btn of buttons) {
+      // Button text looks like "1GB£3.50" or "3 GB $5.50" or "10GB€11.50"
+      const text = btn.textContent.trim();
+      const gbMatch = text.match(/(\d+(?:\.\d+)?)\s*GB/i);
+      const priceMatch = text.match(/([£$€])\s*(\d+(?:\.\d+)?)/);
+
+      if (!gbMatch || !priceMatch) continue;
+
+      const dataGb = parseFloat(gbMatch[1]);
+      const price = parseFloat(priceMatch[2]);
+      const sym = priceMatch[1];
+      const currency = sym === '£' ? 'GBP' : sym === '$' ? 'USD' : 'EUR';
+
+      // Walk up the DOM tree to find the duration group container
+      // (a parent that contains a "N days" text node but not the button's sibling text)
+      let validityDays = null;
+      let node = btn.parentElement;
+      for (let depth = 0; depth < 10 && node; depth++) {
+        const nodeText = node.textContent || '';
+        const daysMatch = nodeText.match(/(\d+)\s*days?/i);
+        if (daysMatch) {
+          validityDays = parseInt(daysMatch[1], 10);
+          break;
+        }
+        node = node.parentElement;
+      }
+
+      if (price > 0) {
+        plans.push({ dataGb, price, currency, validityDays });
+      }
     }
-  }
 
-  return results;
+    return plans;
+  });
 }
 
-function looksLikePlan(obj) {
-  const keys = Object.keys(obj).map((k) => k.toLowerCase());
-  const hasPrice = keys.some((k) =>
-    ['price', 'net_price', 'amount', 'cost', 'retail_price', 'priceincents'].some((pk) => k.includes(pk))
-  );
-  const hasDuration = keys.some((k) =>
-    ['day', 'days', 'validity', 'duration', 'period'].some((dk) => k.includes(dk))
-  );
-  const hasData = keys.some((k) =>
-    ['data', 'gb', 'allowance', 'size', 'bandwidth'].some((dk) => k.includes(dk))
-  );
-  return hasPrice && (hasDuration || hasData);
-}
-
-async function normalizePlan(item, provider) {
-  // Airalo field patterns (may vary by page type)
-  const country =
-    item.country ||
-    item.operator?.country?.title ||
-    item.countries?.[0]?.title ||
-    item.location ||
-    '';
-  const countryCode =
-    (item.country_code || item.operator?.country?.slug || item.iso || '').toUpperCase();
-  const region =
-    item.operator?.country?.region?.title ||
-    item.region?.title ||
-    item.region ||
-    '';
-
-  const dataStr = String(item.data || item.allowance || item.amount || '');
-  const dataGb = parseDataGb(dataStr);
-
-  const validityDays =
-    parseInt(item.day || item.days || item.validity || item.duration || '0') || null;
-
-  // Price: Airalo typically returns USD
-  const priceRaw = parseFloat(
-    item.price || item.net_price || item.retail_price || item.priceInCentsUSD / 100 || '0'
-  );
-  const currency = (item.currency || 'USD').toUpperCase();
-  const planName = item.title || item.name || `${dataGb === null ? 'Unlimited' : dataGb + 'GB'} / ${validityDays}d`;
-
-  if (!country || priceRaw <= 0) return null;
-
-  const { price_eur, price_usd } = await toEurUsd(priceRaw, currency);
-
-  return {
-    provider,
-    country,
-    country_code: countryCode,
-    region,
-    plan_name: planName,
-    data_gb: dataGb,
-    plan_type: dataGb === null ? 'unlimited' : 'data',
-    validity_days: validityDays,
-    price_eur,
-    price_usd,
-  };
-}
-
-function parseDataGb(str) {
-  if (!str) return null;
-  const s = str.toLowerCase().trim();
-  if (s.includes('unlimited') || s === '∞') return null;
-  const m = s.match(/(\d+(?:\.\d+)?)\s*(gb|mb|tb)/i);
-  if (!m) return null;
-  const n = parseFloat(m[1]);
-  const unit = m[2].toLowerCase();
-  if (unit === 'mb') return Math.round((n / 1024) * 100) / 100;
-  if (unit === 'tb') return n * 1024;
-  return n;
-}
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function addUnique(allPlans, seen, plans) {
   for (const p of plans) {

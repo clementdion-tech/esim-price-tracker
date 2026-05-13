@@ -34,6 +34,14 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install chromium --with-deps
 
+      - name: QA — validate scrapers before full run
+        run: |
+          if [ -n "${{ github.event.inputs.providers }}" ]; then
+            node src/test.js --only=${{ github.event.inputs.providers }}
+          else
+            node src/test.js
+          fi
+
       - name: Run scrapers
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

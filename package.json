@@ -10,7 +10,8 @@
     "scrape:airalo": "node src/scrapers/index.js --only=airalo",
     "scrape:saily": "node src/scrapers/index.js --only=saily",
     "scrape:holafly": "node src/scrapers/index.js --only=holafly",
-    "dev": "nodemon src/server.js"
+    "dev": "nodemon src/server.js",
+    "test": "node src/test.js"
   },
   "engines": {
     "node": ">=20"

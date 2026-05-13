@@ -1,12 +1,18 @@
 /**
  * Holafly scraper (esim.holafly.com)
- * Holafly sells unlimited data plans. They use a Nuxt.js / Vue frontend.
- * Strategy: capture XHR + extract __NUXT__ / window state + DOM fallback.
+ * Strategy: DOM scraping via Playwright.
+ * Holafly sells UNLIMITED data eSIMs priced by duration (7d / 15d / 30d etc.), in EUR.
+ *
+ * 1. Load the destination listing page.
+ * 2. Collect all country page links (pattern: /esim-[country]/ or /[lang]/esim-[country]/).
+ * 3. For each country page, wait for duration+price cards to render and extract them.
+ * 4. Process 3 pages in parallel.
  */
 const { chromium } = require('playwright');
 const { toEurUsd } = require('../currency');
 
 const BASE_URL = 'https://esim.holafly.com';
+const CONCURRENCY = 3;
 
 async function scrape() {
   const browser = await chromium.launch({
@@ -23,104 +29,214 @@ async function scrape() {
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       locale: 'en-US',
       viewport: { width: 1440, height: 900 },
+      extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
     });
 
-    const page = await context.newPage();
-    const capturedJson = [];
+    // ── Step 1: collect country links ──────────────────────────────────────
+    console.error('[Holafly] Loading destination list...');
+    const listPage = await context.newPage();
+    let countryLinks = [];
 
-    page.on('response', async (res) => {
-      const ct = res.headers()['content-type'] || '';
-      if (res.status() === 200 && ct.includes('json')) {
-        try {
-          const text = await res.text();
-          if (text.length > 300) {
-            console.error(`[Holafly] XHR: ${res.url().substring(0, 100)} (${text.length}b)`);
-            capturedJson.push({ url: res.url(), text });
-          }
-        } catch (_) {}
-      }
-    });
-
-    // Try English and French entry points
-    for (const path of ['/', '/en/', '/en/esim/', '/fr/', '/esim/']) {
+    const listingPaths = ['/', '/en/', '/en/esim/', '/esim/'];
+    for (const path of listingPaths) {
       try {
-        console.error(`[Holafly] Trying ${BASE_URL}${path}`);
-        await page.goto(`${BASE_URL}${path}`, { waitUntil: 'networkidle', timeout: 45000 });
-        await page.waitForTimeout(2500);
-        await autoScroll(page);
-        await page.waitForTimeout(1500);
-
-        // Try multiple window state patterns
-        const windowState = await page.evaluate(() => {
-          try { return window.__NUXT__ || null; } catch (_) { return null; }
+        await listPage.goto(`${BASE_URL}${path}`, {
+          waitUntil: 'domcontentloaded',
+          timeout: 45000,
         });
-        if (windowState) {
-          const plans = deepSearchPlans(windowState, 'holafly');
-          console.error(`[Holafly] __NUXT__ plans: ${plans.length}`);
-          addUnique(allPlans, seen, plans);
-        }
+        await listPage.waitForTimeout(6000);
 
-        // Next.js fallback
-        const nd = await extractNextData(page);
-        if (nd) {
-          const plans = deepSearchPlans(nd, 'holafly');
-          console.error(`[Holafly] __NEXT_DATA__ plans: ${plans.length}`);
-          addUnique(allPlans, seen, plans);
-        }
+        // Wait for any destination link to appear
+        try {
+          await listPage.waitForSelector('a[href*="-esim"], a[href*="/esim-"]', { timeout: 10000 });
+        } catch (_) { /* may not match */ }
 
-        // XHR responses
-        for (const { url, text } of capturedJson) {
-          try {
-            const plans = deepSearchPlans(JSON.parse(text), 'holafly');
-            if (plans.length > 0) console.error(`[Holafly] ${plans.length} from XHR ${url.substring(0, 80)}`);
-            addUnique(allPlans, seen, plans);
-          } catch (_) {}
-        }
+        countryLinks = await listPage.$$eval(
+          'a',
+          (els, base) => {
+            const valid = [];
+            for (const el of els) {
+              const href = (el.href || '').split('?')[0].split('#')[0];
+              if (!href.startsWith(base)) continue;
+              // Accept links that contain "-esim" in the slug, or "/esim-" path segment
+              // Exclude top-level nav / utility pages
+              if (
+                href === base ||
+                href === base + '/' ||
+                /\/(blog|faq|about|contact|terms|privacy|support|help|login|register)\/?/.test(href)
+              ) continue;
+              if (
+                href.includes('-esim') ||
+                href.includes('/esim-') ||
+                // e.g. /en/esim-france/
+                /\/esim-[a-z]/.test(href.replace(base, ''))
+              ) {
+                valid.push(href);
+              }
+            }
+            return [...new Set(valid)].slice(0, 250);
+          },
+          BASE_URL
+        );
 
-        if (allPlans.length > 0) break;
+        if (countryLinks.length > 5) {
+          console.error(`[Holafly] Found ${countryLinks.length} country links from ${path}`);
+          break;
+        }
       } catch (err) {
-        console.error(`[Holafly] ${path} error: ${err.message}`);
+        console.error(`[Holafly] Listing ${path} error: ${err.message}`);
       }
     }
 
-    // Get country links and visit individually
-    const countryLinks = await page.$$eval(
-      'a[href*="esim"], a[href*="country"], a[href*="destino"], a[href*="destination"]',
-      (els, base) =>
-        [...new Set(
-          els
-            .map((el) => el.href)
-            .filter((h) => h.startsWith(base) && h !== base && !h.includes('#'))
-        )].slice(0, 200),
-      BASE_URL
-    );
-    console.error(`[Holafly] ${countryLinks.length} country links`);
+    await listPage.close();
+    console.error(`[Holafly] Processing ${countryLinks.length} country pages...`);
 
-    for (const href of countryLinks) {
-      capturedJson.length = 0;
-      try {
-        await page.goto(href, { waitUntil: 'networkidle', timeout: 35000 });
-        await page.waitForTimeout(1500);
+    // ── Step 2: scrape each country page in parallel chunks ───────────────
+    for (let i = 0; i < countryLinks.length; i += CONCURRENCY) {
+      const chunk = countryLinks.slice(i, i + CONCURRENCY);
 
-        // Window state
-        const ws = await page.evaluate(() => {
-          try { return window.__NUXT__ || null; } catch (_) { return null; }
-        });
-        if (ws) addUnique(allPlans, seen, deepSearchPlans(ws, 'holafly'));
+      await Promise.all(
+        chunk.map(async (href) => {
+          const page = await context.newPage();
+          try {
+            await page.goto(href, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
-        const nd = await extractNextData(page);
-        if (nd) addUnique(allPlans, seen, deepSearchPlans(nd, 'holafly'));
+            // Wait for pricing to render — try several selector patterns
+            const pricingSelectors = [
+              '[class*="duration"]',
+              '[class*="period"]',
+              '[class*="price"]',
+              '[class*="plan"]',
+              '[class*="card"]',
+              '[data-testid*="plan"]',
+              '[data-testid*="duration"]',
+              '[data-testid*="price"]',
+            ];
+            let selectorHit = false;
+            for (const sel of pricingSelectors) {
+              try {
+                await page.waitForSelector(sel, { timeout: 5000 });
+                selectorHit = true;
+                break;
+              } catch (_) { /* try next */ }
+            }
+            if (!selectorHit) {
+              await page.waitForTimeout(5000);
+            }
 
-        // XHR
-        for (const { text } of capturedJson) {
-          try { addUnique(allPlans, seen, deepSearchPlans(JSON.parse(text), 'holafly')); } catch (_) {}
-        }
+            // ── DOM extraction ───────────────────────────────────────────
+            const rawPlans = await page.evaluate(() => {
+              const results = [];
 
-        // DOM fallback: Holafly shows duration + price as cards
-        const domPlans = await extractHolaflyDom(page, href);
-        addUnique(allPlans, seen, domPlans);
+              // ── Strategy A: structured card elements ──────────────────
+              // Holafly renders each duration option as a card/button with days + price
+              const cardSelectors = [
+                '[class*="duration"]',
+                '[class*="period"]',
+                '[class*="DurationCard"]',
+                '[class*="PeriodCard"]',
+                '[class*="plan-option"]',
+                '[class*="PlanOption"]',
+                '[class*="offer"]',
+                '[data-testid*="plan"]',
+                '[data-testid*="duration"]',
+              ];
 
-      } catch (_) {}
+              const cards = [];
+              for (const sel of cardSelectors) {
+                cards.push(...document.querySelectorAll(sel));
+              }
+              const uniqueCards = [...new Set(cards)];
+
+              for (const card of uniqueCards) {
+                const text = (card.innerText || card.textContent || '').replace(/\s+/g, ' ').trim();
+                if (!text) continue;
+
+                // Needs a "X days/day" pattern and a price
+                const daysMatch = text.match(/(\d+)\s*(?:day|days|jour|jours|día|días|Tag|Tage|giorni)/i);
+                const priceMatch = text.match(/€\s*(\d+(?:[.,]\d+)?)/) ||
+                                   text.match(/(\d+(?:[.,]\d+)?)\s*€/);
+
+                if (daysMatch && priceMatch) {
+                  results.push({
+                    days: parseInt(daysMatch[1]),
+                    price: parseFloat(priceMatch[1].replace(',', '.')),
+                    source: 'card',
+                  });
+                }
+              }
+
+              // ── Strategy B: page-level text scan (fallback) ───────────
+              if (results.length === 0) {
+                const bodyText = document.body.innerText || '';
+
+                // Pattern: "7 days ... €19" or "€19 ... 7 days" within ~80 chars
+                const fwdRegex = /(\d+)\s*(?:day|days|jour|jours|día|días|Tag|Tage|giorni)[\s\S]{0,80}?€\s*(\d+(?:[.,]\d+)?)/gi;
+                let m;
+                while ((m = fwdRegex.exec(bodyText)) !== null) {
+                  const price = parseFloat(m[2].replace(',', '.'));
+                  if (price > 0) {
+                    results.push({ days: parseInt(m[1]), price, source: 'regex-fwd' });
+                  }
+                }
+
+                const revRegex = /€\s*(\d+(?:[.,]\d+)?)[\s\S]{0,80}?(\d+)\s*(?:day|days|jour|jours|día|días|Tag|Tage|giorni)/gi;
+                while ((m = revRegex.exec(bodyText)) !== null) {
+                  const price = parseFloat(m[1].replace(',', '.'));
+                  if (price > 0) {
+                    results.push({ days: parseInt(m[2]), price, source: 'regex-rev' });
+                  }
+                }
+              }
+
+              // Deduplicate by (days, price)
+              const seen = new Set();
+              return results.filter(({ days, price }) => {
+                const key = `${days}|${price}`;
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return days > 0 && price > 0;
+              });
+            });
+
+            // Resolve country name from URL
+            const slug = href.replace(/\/$/, '').split('/').pop() || '';
+            // Handles patterns: esim-france, france-esim, esim-united-states
+            const countryName = slug
+              .replace(/^esim-/, '')
+              .replace(/-esim$/, '')
+              .replace(/-/g, ' ')
+              .replace(/\b\w/g, (c) => c.toUpperCase());
+
+            const plans = [];
+            for (const raw of rawPlans) {
+              if (!raw.price || raw.price <= 0 || !raw.days) continue;
+              const { price_eur, price_usd } = await toEurUsd(raw.price, 'EUR');
+              plans.push({
+                provider: 'holafly',
+                country: countryName,
+                country_code: '',
+                region: '',
+                plan_name: `Unlimited / ${raw.days}d`,
+                data_gb: null,
+                plan_type: 'unlimited',
+                validity_days: raw.days,
+                price_eur,
+                price_usd,
+              });
+            }
+
+            const totalSoFar = i + chunk.indexOf(href) + 1;
+            console.error(`[Holafly] [${totalSoFar}/${countryLinks.length}] ${countryName} — ${plans.length} plans`);
+
+            addUnique(allPlans, seen, plans);
+          } catch (err) {
+            console.error(`[Holafly] Error on ${href}: ${err.message}`);
+          } finally {
+            await page.close();
+          }
+        })
+      );
     }
   } finally {
     await browser.close();
@@ -130,139 +246,15 @@ async function scrape() {
   return allPlans;
 }
 
-async function extractNextData(page) {
-  try {
-    const raw = await page.$eval('#__NEXT_DATA__', (el) => el.textContent);
-    return JSON.parse(raw);
-  } catch (_) { return null; }
-}
-
-async function extractHolaflyDom(page, href) {
-  const plans = [];
-  try {
-    const countrySlug = href.replace(/\/$/, '').split('/').pop() || '';
-    const countryName = countrySlug.replace(/-esim.*$/, '').replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-
-    const cards = await page.evaluate(() => {
-      const results = [];
-      // Holafly renders plan options with duration + price
-      const allText = document.body.innerText;
-      // Look for "X days" next to a price pattern
-      const regex = /(\d+)\s*(?:day|jour|día|giorni|Tag)s?[^\n€$]*[€$]\s*(\d+(?:[.,]\d+)?)/gi;
-      let m;
-      while ((m = regex.exec(allText)) !== null) {
-        results.push({ days: parseInt(m[1]), price: parseFloat(m[2].replace(',', '.')) });
-      }
-      return results;
-    });
-
-    for (const { days, price } of cards) {
-      if (days > 0 && price > 0) {
-        const { price_eur, price_usd } = await toEurUsd(price, 'EUR');
-        plans.push({
-          provider: 'holafly',
-          country: countryName,
-          country_code: '',
-          region: '',
-          plan_name: `Unlimited / ${days}d`,
-          data_gb: null,
-          plan_type: 'unlimited',
-          validity_days: days,
-          price_eur,
-          price_usd,
-        });
-      }
-    }
-  } catch (_) {}
-  return plans;
-}
-
-function deepSearchPlans(obj, provider, depth = 0, results = []) {
-  if (depth > 20 || !obj) return results;
-
-  if (Array.isArray(obj) && obj.length > 0 && obj.length < 2000) {
-    const sample = obj[0];
-    if (sample && typeof sample === 'object' && looksLikePlan(sample)) {
-      const plans = obj.map((item) => normalizePlan(item, provider)).filter(Boolean);
-      if (plans.length > 0) results.push(...plans);
-      return results;
-    }
-  }
-
-  if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-    for (const v of Object.values(obj)) {
-      deepSearchPlans(v, provider, depth + 1, results);
-    }
-  }
-  return results;
-}
-
-function looksLikePlan(obj) {
-  const keys = Object.keys(obj).map((k) => k.toLowerCase());
-  const hasPrice = keys.some((k) => ['price', 'amount', 'cost'].some((pk) => k.includes(pk)));
-  const hasDuration = keys.some((k) => ['day', 'days', 'validity', 'duration'].some((dk) => k.includes(dk)));
-  return hasPrice && hasDuration;
-}
-
-async function normalizePlan(item, provider) {
-  const country = item.country || item.country_name || item.destination || item.location || '';
-  const countryCode = (item.country_code || item.iso || item.code || '').toUpperCase();
-  const region = item.region || item.continent || '';
-  const dataStr = String(item.data || item.data_amount || '');
-  const dataGb = parseDataGb(dataStr);
-  const isUnlimited = dataGb === null || item.unlimited || item.is_unlimited ||
-    String(item.data || '').toLowerCase().includes('unlimited');
-  const validityDays = parseInt(item.duration || item.days || item.validity || item.day || '0') || null;
-  const priceRaw = parseFloat(item.price || item.amount || item.cost || '0');
-  const currency = (item.currency || 'EUR').toUpperCase();
-
-  if (!country || priceRaw <= 0) return null;
-
-  const { price_eur, price_usd } = await toEurUsd(priceRaw, currency);
-
-  return {
-    provider,
-    country,
-    country_code: countryCode,
-    region,
-    plan_name: item.title || item.name || (isUnlimited ? `Unlimited / ${validityDays}d` : `${dataGb}GB / ${validityDays}d`),
-    data_gb: isUnlimited ? null : dataGb,
-    plan_type: isUnlimited ? 'unlimited' : 'data',
-    validity_days: validityDays,
-    price_eur,
-    price_usd,
-  };
-}
-
-function parseDataGb(str) {
-  if (!str) return null;
-  const s = str.toLowerCase().trim();
-  if (s.includes('unlimited') || s === '∞') return null;
-  const m = s.match(/(\d+(?:\.\d+)?)\s*(gb|mb|tb)/i);
-  if (!m) return null;
-  const n = parseFloat(m[1]);
-  const unit = m[2].toLowerCase();
-  if (unit === 'mb') return Math.round((n / 1024) * 100) / 100;
-  return n;
-}
-
-async function autoScroll(page) {
-  await page.evaluate(async () => {
-    await new Promise((resolve) => {
-      let total = 0;
-      const timer = setInterval(() => {
-        window.scrollBy(0, 400);
-        total += 400;
-        if (total >= document.body.scrollHeight - window.innerHeight) { clearInterval(timer); resolve(); }
-      }, 200);
-    });
-  });
-}
+// ── Helpers ────────────────────────────────────────────────────────────────
 
 function addUnique(allPlans, seen, plans) {
   for (const p of plans) {
     const key = `${p.provider}|${p.country_code || p.country}|${p.data_gb}|${p.validity_days}|${p.price_eur}`;
-    if (!seen.has(key)) { seen.add(key); allPlans.push(p); }
+    if (!seen.has(key)) {
+      seen.add(key);
+      allPlans.push(p);
+    }
   }
 }
 
