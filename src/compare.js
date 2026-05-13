@@ -152,6 +152,8 @@ const COUNTRY_ALIASES = {
   'ivory coast': "Côte d'Ivoire",
   'sint maarten': 'Sint Maarten (Dutch Part)',
   'us virgin islands': 'Virgin Islands (U.S.)',
+  'faroe': 'Faroe Islands',
+  'faeroe islands': 'Faroe Islands',
   'us vi': 'Virgin Islands (U.S.)',
   'caribbean cruise': 'Caribbean (Multi-country)',
   'alaska cruise': 'Alaska Cruise',
@@ -209,11 +211,10 @@ function roundToStandardGb(gb) {
  * Preference order: 2-letter > first 2 chars of 3-letter > empty.
  */
 function bestCountryCode(plans) {
+  // Only use proper 2-letter ISO codes — truncating 3-letter codes is unreliable
+  // (e.g. Kolet's "FRO" for Faroe Islands → "FR" = France flag)
   for (const p of plans) {
     if (p.country_code && p.country_code.length === 2) return p.country_code.toUpperCase();
-  }
-  for (const p of plans) {
-    if (p.country_code && p.country_code.length >= 2) return p.country_code.toUpperCase().slice(0, 2);
   }
   return '';
 }
