@@ -70,17 +70,17 @@ function compare(previousPlans, freshPlans) {
     const prevSet = prevCountries.get(provider) || new Set();
     const freshSet = freshCountries.get(provider) || new Set();
 
-    for (const countryCode of freshSet) {
-      if (!prevSet.has(countryCode) && prevSet.size > 0) {
-        // Find a plan to get the country name
+    for (const countryKey of freshSet) {
+      if (!prevSet.has(countryKey) && prevSet.size > 0) {
+        // Find a plan to get display name, code and region
         const sample = freshPlans.find(
-          (p) => p.provider === provider && p.country_code === countryCode
+          (p) => p.provider === provider && (p.country || '').toLowerCase().trim() === countryKey
         );
         newCountries.push({
           detected_at: new Date().toISOString(),
           provider,
-          country: sample?.country || countryCode,
-          country_code: countryCode,
+          country: sample?.country || countryKey,
+          country_code: sample?.country_code || '',
           region: sample?.region || '',
         });
       }
@@ -108,7 +108,7 @@ function buildMap(plans) {
 function planKey(plan) {
   const dataGb = plan.data_gb === null ? 'unlimited' : String(plan.data_gb);
   const days = normalizeDays(plan.validity_days);
-  return `${plan.provider}|${(plan.country_code || plan.country || '').toUpperCase()}|${plan.plan_type}|${dataGb}|${days}`;
+  return `${plan.provider}|${(plan.country || '').toLowerCase().trim()}|${plan.plan_type}|${dataGb}|${days}`;
 }
 
 function normalizeDays(days) {
@@ -124,27 +124,67 @@ function buildCountrySet(plans) {
   const map = new Map();
   for (const plan of plans) {
     if (!map.has(plan.provider)) map.set(plan.provider, new Set());
-    const code = plan.country_code || plan.country;
-    if (code) map.get(plan.provider).add(code.toUpperCase());
+    const code = plan.country ? plan.country.toLowerCase().trim() : '';
+    if (code) map.get(plan.provider).add(code);
   }
   return map;
 }
 
 /**
+ * Normalise a country/destination name for grouping.
+ * Lowercase + trim + collapse spaces.
+ */
+function normalizeCountryName(name) {
+  return (name || '').toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
+/**
+ * Return the best available ISO-2 country code from a set of plans for the same country.
+ * Preference order: 2-letter > first 2 chars of 3-letter > empty.
+ */
+function bestCountryCode(plans) {
+  for (const p of plans) {
+    if (p.country_code && p.country_code.length === 2) return p.country_code.toUpperCase();
+  }
+  for (const p of plans) {
+    if (p.country_code && p.country_code.length >= 2) return p.country_code.toUpperCase().slice(0, 2);
+  }
+  return '';
+}
+
+/**
  * Build the comparison matrix for the dashboard.
  * Returns an array of rows, each representing a unique plan spec across countries.
+ * Groups by NORMALISED COUNTRY NAME so that the same country from different
+ * providers (which may use different ISO codes) is merged into one row.
  */
 function buildComparisonMatrix(plans) {
   const providers = ['kolet', 'airalo', 'saily', 'holafly'];
 
-  // Group by country
+  // Group by normalised country name (not country_code — providers use different schemes)
   const byCountry = new Map();
   for (const plan of plans) {
-    const key = (plan.country_code || plan.country || '').toUpperCase();
+    const key = normalizeCountryName(plan.country);
+    if (!key) continue;
     if (!byCountry.has(key)) {
-      byCountry.set(key, { country: plan.country, country_code: key, region: plan.region, plans: [] });
+      byCountry.set(key, {
+        country: plan.country,   // keep display name from first occurrence
+        country_code: '',        // filled after grouping
+        region: plan.region || '',
+        plans: [],
+      });
     }
-    byCountry.get(key).plans.push(plan);
+    const entry = byCountry.get(key);
+    // Prefer prettier display names (title case, not ALL CAPS)
+    if (plan.country && plan.country.length < entry.country.length) entry.country = plan.country;
+    // Prefer non-empty region
+    if (!entry.region && plan.region) entry.region = plan.region;
+    entry.plans.push(plan);
+  }
+
+  // Resolve the best ISO-2 code for each country group
+  for (const entry of byCountry.values()) {
+    entry.country_code = bestCountryCode(entry.plans);
   }
 
   const matrix = [];

@@ -24,6 +24,7 @@
  *  - We force the /en/ locale prefix on all pages to avoid locale-specific content
  *    (French pages say "Go" instead of "GB" and use comma decimal separators).
  */
+const { isUtilitySlug } = require('../lib/utils');
 const { chromium } = require('playwright-extra');
 const stealth = require('puppeteer-extra-plugin-stealth');
 chromium.use(stealth());
@@ -122,8 +123,8 @@ async function scrape() {
           }
 
           const slug = path.replace(/^\/esim-/, '').replace(/\/$/, '');
-          // Only skip sub-pages (e.g. europe/special) — keep regional slugs like europe, asia
-          if (slug.includes('/')) continue;
+          // Skip sub-pages and non-plan utility/marketing pages
+          if (slug.includes('/') || isUtilitySlug(slug)) continue;
 
           const countryName = slug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
           // Always use the explicit /en/ locale URL to avoid locale redirect contamination

@@ -10,120 +10,149 @@
 </head>
 <body>
 
-<!-- Navbar -->
-<nav class="navbar navbar-dark bg-dark sticky-top shadow-sm">
-  <div class="container-fluid px-4">
-    <span class="navbar-brand fw-bold fs-5">
-      <i class="bi bi-wifi me-2 text-primary"></i>eSIM Price Tracker
-    </span>
-    <div class="d-flex align-items-center gap-3">
-      <span id="last-updated" class="text-secondary small"></span>
-      <button class="btn btn-sm btn-outline-light" onclick="loadData()">
-        <i class="bi bi-arrow-clockwise"></i> Refresh
+<!-- Top Bar -->
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="topbar-brand">
+      <div class="brand-icon"><i class="bi bi-reception-4"></i></div>
+      <div>
+        <div class="brand-name">eSIM Price Tracker</div>
+        <div class="brand-sub">Kolet Competitive Intelligence</div>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="last-updated" class="last-updated-text"></span>
+      <button class="btn-refresh" onclick="loadData()">
+        <i class="bi bi-arrow-clockwise" id="refresh-icon"></i>
+        Refresh
       </button>
     </div>
   </div>
-</nav>
+</header>
 
-<div class="container-fluid px-4 py-4">
+<main class="main-content">
 
-  <!-- Stats row -->
-  <div class="row g-3 mb-4" id="stats-row">
-    <div class="col-6 col-md-3"><div class="stat-card" id="stat-kolet"></div></div>
-    <div class="col-6 col-md-3"><div class="stat-card" id="stat-airalo"></div></div>
-    <div class="col-6 col-md-3"><div class="stat-card" id="stat-saily"></div></div>
-    <div class="col-6 col-md-3"><div class="stat-card" id="stat-holafly"></div></div>
-  </div>
+  <!-- Stats Row -->
+  <section class="stats-section">
+    <div id="stat-kolet"   class="stat-card stat-card--kolet"></div>
+    <div id="stat-airalo"  class="stat-card stat-card--airalo"></div>
+    <div id="stat-saily"   class="stat-card stat-card--saily"></div>
+    <div id="stat-holafly" class="stat-card stat-card--holafly"></div>
+  </section>
 
-  <!-- Price changes panel -->
-  <div id="changes-panel" class="mb-4 d-none">
-    <div class="section-card">
-      <div class="section-header">
-        <i class="bi bi-graph-up-arrow me-2"></i>Recent Price Changes
-        <span class="badge bg-warning text-dark ms-2" id="changes-badge"></span>
-      </div>
-      <div id="changes-list" class="changes-grid"></div>
-    </div>
-  </div>
+  <!-- Alert Panels Row -->
+  <div class="alerts-row" id="alerts-row">
 
-  <!-- New countries panel -->
-  <div id="new-countries-panel" class="mb-4 d-none">
-    <div class="section-card">
-      <div class="section-header">
-        <i class="bi bi-globe-americas me-2"></i>New Countries / Destinations
-        <small class="text-muted ms-2">(added by competitors in the last 90 days)</small>
-      </div>
-      <div id="new-countries-list" class="d-flex flex-wrap gap-2 pt-2"></div>
-    </div>
-  </div>
-
-  <!-- Filters -->
-  <div class="section-card mb-4">
-    <div class="row g-2 align-items-end">
-      <div class="col-md-4">
-        <label class="form-label small fw-semibold">Search country</label>
-        <input type="text" id="filter-country" class="form-control form-control-sm"
-          placeholder="e.g. France, Japan…" oninput="renderMatrix()" />
-      </div>
-      <div class="col-md-3">
-        <label class="form-label small fw-semibold">Region</label>
-        <select id="filter-region" class="form-select form-select-sm" onchange="renderMatrix()">
-          <option value="">All regions</option>
-        </select>
-      </div>
-      <div class="col-md-3">
-        <label class="form-label small fw-semibold">Plan type</label>
-        <select id="filter-type" class="form-select form-select-sm" onchange="renderMatrix()">
-          <option value="">All types</option>
-          <option value="data">Data plans</option>
-          <option value="unlimited">Unlimited</option>
-          <option value="daily">Daily pass</option>
-        </select>
-      </div>
-      <div class="col-md-2">
-        <label class="form-label small fw-semibold">Show gaps only</label>
-        <div class="form-check form-switch mt-1">
-          <input class="form-check-input" type="checkbox" id="filter-gaps" onchange="renderMatrix()" />
-          <label class="form-check-label small" for="filter-gaps">Gaps only</label>
+    <!-- Price Changes Panel -->
+    <div id="changes-panel" class="alert-panel d-none">
+      <div class="alert-panel-header" onclick="togglePanel('changes-body', 'changes-chevron')">
+        <div class="alert-panel-title">
+          <i class="bi bi-arrow-left-right alert-icon alert-icon--amber"></i>
+          Recent Price Changes
+          <span class="alert-count alert-count--amber" id="changes-badge">0</span>
         </div>
+        <i class="bi bi-chevron-down panel-chevron" id="changes-chevron"></i>
+      </div>
+      <div id="changes-body" class="alert-panel-body">
+        <div id="changes-list" class="changes-scroll"></div>
       </div>
     </div>
+
+    <!-- New Countries Panel -->
+    <div id="new-countries-panel" class="alert-panel d-none">
+      <div class="alert-panel-header" onclick="togglePanel('new-countries-body', 'new-countries-chevron')">
+        <div class="alert-panel-title">
+          <i class="bi bi-globe-americas alert-icon alert-icon--blue"></i>
+          New Countries
+          <span class="alert-count alert-count--blue" id="new-countries-badge">0</span>
+          <span class="alert-note">added by competitors recently</span>
+        </div>
+        <i class="bi bi-chevron-down panel-chevron" id="new-countries-chevron"></i>
+      </div>
+      <div id="new-countries-body" class="alert-panel-body">
+        <div id="new-countries-list" class="new-countries-wrap"></div>
+      </div>
+    </div>
+
   </div>
 
-  <!-- Comparison table -->
-  <div class="section-card">
-    <div class="section-header mb-3">
-      <i class="bi bi-table me-2"></i>Pricing Comparison
-      <span class="text-muted small ms-2" id="country-count"></span>
+  <!-- Filter Bar -->
+  <div class="filter-bar">
+    <div class="filter-search">
+      <i class="bi bi-search filter-search-icon"></i>
+      <input type="text" id="filter-country" class="filter-input" placeholder="Search country…" oninput="renderMatrix()" />
+    </div>
+    <div class="filter-group">
+      <label class="filter-label">Region</label>
+      <select id="filter-region" class="filter-select" onchange="renderMatrix()">
+        <option value="">All regions</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label class="filter-label">Plan type</label>
+      <div class="segmented" id="type-seg">
+        <button class="seg-btn active" data-value="" onclick="setTypeFilter(this)">All</button>
+        <button class="seg-btn" data-value="data" onclick="setTypeFilter(this)">Data</button>
+        <button class="seg-btn" data-value="unlimited" onclick="setTypeFilter(this)">Unlimited</button>
+        <button class="seg-btn" data-value="daily" onclick="setTypeFilter(this)">Daily</button>
+      </div>
+    </div>
+    <div class="filter-group filter-group--toggle">
+      <label class="filter-label" for="filter-gaps">Gaps only</label>
+      <label class="toggle-switch">
+        <input type="checkbox" id="filter-gaps" onchange="renderMatrix()" />
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+    <button class="filter-reset" onclick="resetFilters()">
+      <i class="bi bi-x-circle me-1"></i>Reset
+    </button>
+  </div>
+
+  <!-- Comparison Table -->
+  <div class="table-section">
+    <div class="table-section-header">
+      <div class="table-section-title">
+        <i class="bi bi-table me-2"></i>Pricing Comparison
+      </div>
+      <span class="country-count-badge" id="country-count"></span>
     </div>
 
-    <div id="loading" class="text-center py-5">
-      <div class="spinner-border text-primary" role="status"></div>
-      <p class="mt-2 text-muted">Loading pricing data…</p>
+    <div id="loading" class="empty-state">
+      <div class="spinner-border text-primary" role="status" style="width:2rem;height:2rem"></div>
+      <p class="empty-state-text">Loading pricing data…</p>
     </div>
 
-    <div id="no-data" class="text-center py-5 d-none text-muted">
-      <i class="bi bi-database-slash fs-1"></i>
-      <p class="mt-2">No pricing data yet. Run the scraper to populate.</p>
-      <code class="small">npm run scrape</code>
+    <div id="no-data" class="empty-state d-none">
+      <i class="bi bi-database-slash empty-state-icon"></i>
+      <p class="empty-state-text">No pricing data yet.</p>
+      <code class="empty-state-code">npm run scrape</code>
     </div>
 
     <div id="matrix-container" class="d-none">
-      <div id="matrix-accordion" class="accordion"></div>
+      <div id="matrix-accordion"></div>
     </div>
   </div>
 
-</div>
+</main>
 
 <!-- Legend -->
-<div class="container-fluid px-4 pb-4">
-  <div class="d-flex flex-wrap gap-3 align-items-center small text-muted">
-    <span><span class="legend-dot bg-success"></span> Price decrease</span>
-    <span><span class="legend-dot bg-danger"></span> Price increase</span>
-    <span><span class="legend-dot bg-secondary"></span> Gap (plan not available)</span>
-    <span><span class="legend-dot border border-warning"></span> Cheapest in row</span>
+<footer class="legend-footer">
+  <div class="legend-inner">
+    <span class="legend-item"><span class="legend-chip legend-chip--green"></span>Cheapest in row</span>
+    <span class="legend-item"><span class="legend-chip legend-chip--gray"></span>Gap — plan not offered</span>
+    <span class="legend-item"><span class="legend-chip legend-chip--amber"></span>Price changed</span>
+    <span class="legend-sep"></span>
+    <span class="legend-item"><span class="badge-pill badge-data-sm">Data</span></span>
+    <span class="legend-item"><span class="badge-pill badge-unlimited-sm">Unlimited</span></span>
+    <span class="legend-item"><span class="badge-pill badge-daily-sm">Daily</span></span>
+    <span class="legend-sep"></span>
+    <span class="legend-provider"><span class="prov-dot prov-dot--kolet"></span>Kolet</span>
+    <span class="legend-provider"><span class="prov-dot prov-dot--airalo"></span>Airalo</span>
+    <span class="legend-provider"><span class="prov-dot prov-dot--saily"></span>Saily</span>
+    <span class="legend-provider"><span class="prov-dot prov-dot--holafly"></span>Holafly</span>
   </div>
-</div>
+</footer>
 
 <script src="/js/dashboard.js"></script>
 </body>

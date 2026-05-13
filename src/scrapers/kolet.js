@@ -6,6 +6,11 @@ const axios = require('axios');
 
 const API_URL = 'https://api.kolet.com/catalog/plans/anonymous';
 
+function roundToStandardGb(gb) {
+  const standards = [0.5, 1, 1.5, 2, 3, 5, 7, 10, 15, 20, 25, 30, 50, 100];
+  return standards.reduce((prev, curr) => Math.abs(curr - gb) < Math.abs(prev - gb) ? curr : prev);
+}
+
 async function scrape() {
   console.error('[Kolet] Fetching from API...');
 
@@ -22,7 +27,7 @@ async function scrape() {
   for (const plan of data.plans || []) {
     if (!plan.zone?.enabled) continue;
 
-    const dataGb = Math.round((plan.allowanceInMb / 1024) * 100) / 100;
+    const dataGb = roundToStandardGb(plan.allowanceInMb / 1024);
     const priceEur = plan.priceInCentsEUR / 100;
     const priceUsd = plan.priceInCentsUSD / 100;
 

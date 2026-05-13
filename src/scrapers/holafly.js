@@ -13,19 +13,11 @@
  */
 const { chromium } = require('playwright');
 const { toEurUsd } = require('../currency');
+const { isUtilitySlug, isHolaflyCity } = require('../lib/utils');
 
 const SHOP_URL = 'https://esim.holafly.com/shop/all-destinations/';
 const BASE_URL = 'https://esim.holafly.com';
 const CONCURRENCY = 3;
-
-// Non-plan pages to exclude (utility/nav pages, not actual eSIM destinations)
-const EXCLUDED_SLUGS = new Set([
-  'esim-rewards-loyalty-program',
-  'esim-installation-and-activation-instructions',
-  'esim-how-to-install',
-  'esim-compatible-devices',
-  'esim-faq',
-]);
 
 async function scrape() {
   const browser = await chromium.launch({
@@ -67,17 +59,19 @@ async function scrape() {
       }
       await listPage.waitForTimeout(1500);
 
-      countryLinks = await listPage.evaluate(({ base, excluded }) => {
-        const links = [...new Set(
+      const rawLinks = await listPage.evaluate((base) => {
+        return [...new Set(
           [...document.querySelectorAll('a')]
             .map(a => a.href.split('?')[0].split('#')[0])
             .filter(h => h.startsWith(base + '/esim-'))
         )];
-        return links.filter(h => {
-          const slug = h.replace(base + '/', '').replace(/\/$/, '');
-          return !excluded.includes(slug);
-        });
-      }, { base: BASE_URL, excluded: [...EXCLUDED_SLUGS] });
+      }, BASE_URL);
+
+      // Filter out utility/marketing pages server-side (page.evaluate can't call Node modules)
+      countryLinks = rawLinks.filter(h => {
+        const slug = h.replace(BASE_URL + '/esim-', '').replace(/\/$/, '');
+        return !isUtilitySlug(slug) && !isHolaflyCity(slug);
+      });
 
       console.error(`[Holafly] Found ${countryLinks.length} country links`);
     } catch (err) {
