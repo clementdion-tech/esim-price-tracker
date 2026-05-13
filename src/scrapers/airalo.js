@@ -165,29 +165,51 @@ async function extractPackagesFromPage(page, countryName, countrySlug) {
       { timeout: 12000 }
     );
   } catch {
-    // Buttons never appeared — page may be geo-blocked or empty
     return [];
   }
 
-  // page.evaluate runs synchronously in the browser context
+  // Wait for button content to hydrate
+  await page.waitForFunction(
+    () => document.querySelector('[data-testid="package-grouped-packages_package-button"]')?.textContent?.match(/[£$€]/),
+    { timeout: 8000 }
+  ).catch(() => {});
+
+  // Extract from the current tab (Standard data plans)
+  const standardPlans = await extractButtonPlans(page);
+
+  // Check if an "Unlimited" tab exists and click it
+  const hasUnlimitedTab = await page.$('[data-testid="segmented-control_tab-unlimited"]') !== null;
+  let unlimitedPlans = [];
+
+  if (hasUnlimitedTab) {
+    try {
+      await page.click('[data-testid="segmented-control_tab-unlimited"]');
+      // Wait for the tab to switch — buttons will momentarily disappear then reappear with unlimited plans
+      await page.waitForFunction(
+        () => {
+          const btn = document.querySelector('[data-testid="package-grouped-packages_package-button"]');
+          return btn && /unlimited/i.test(btn.textContent);
+        },
+        { timeout: 8000 }
+      );
+      unlimitedPlans = await extractButtonPlans(page);
+    } catch (_) {
+      // Unlimited tab exists but failed to load — skip gracefully
+    }
+  }
+
+  return [...standardPlans, ...unlimitedPlans];
+}
+
+/** Extracts all package button plans from the currently visible tab. Sync-safe. */
+function extractButtonPlans(page) {
   return page.evaluate(() => {
     const plans = [];
-
-    /**
-     * Find all "duration group" containers.
-     * Each group is a DIV whose text starts with "N days" and that contains
-     * at least one package button.
-     *
-     * Strategy: find all buttons first, then walk up to their parent container
-     * that also holds a "N days" text node, so we don't depend on a specific
-     * class name that can change.
-     */
     const buttons = [
       ...document.querySelectorAll('[data-testid="package-grouped-packages_package-button"]'),
     ];
 
     for (const btn of buttons) {
-      // Button text: "1GB£3.50", "3 GB $5.50", "10GB€11.50", or "Unlimited$X.XX"
       const text = btn.textContent.trim();
       const gbMatch = text.match(/(\d+(?:\.\d+)?)\s*GB/i);
       const isUnlimited = /unlimited/i.test(text);
@@ -200,25 +222,17 @@ async function extractPackagesFromPage(page, countryName, countrySlug) {
       const sym = priceMatch[1];
       const currency = sym === '£' ? 'GBP' : sym === '$' ? 'USD' : 'EUR';
 
-      // Walk up the DOM tree to find the duration group container
-      // (a parent that contains a "N days" text node but not the button's sibling text)
+      // Walk up DOM to find "N days" group header
       let validityDays = null;
       let node = btn.parentElement;
       for (let depth = 0; depth < 10 && node; depth++) {
-        const nodeText = node.textContent || '';
-        const daysMatch = nodeText.match(/(\d+)\s*days?/i);
-        if (daysMatch) {
-          validityDays = parseInt(daysMatch[1], 10);
-          break;
-        }
+        const daysMatch = (node.textContent || '').match(/(\d+)\s*days?/i);
+        if (daysMatch) { validityDays = parseInt(daysMatch[1], 10); break; }
         node = node.parentElement;
       }
 
-      if (price > 0) {
-        plans.push({ dataGb, price, currency, validityDays });
-      }
+      if (price > 0) plans.push({ dataGb, price, currency, validityDays });
     }
-
     return plans;
   });
 }

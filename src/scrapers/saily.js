@@ -275,7 +275,7 @@ async function scrapeCountry(page, country, idx, total) {
     }
 
     // ── Unlimited plans ───────────────────────────────────────────────────────
-    const unlimitedPlans = await scrapeUnlimitedPlans(page, rawHtml);
+    const unlimitedPlans = await scrapeUnlimitedPlans(page);
 
     // Merge, dedup, normalise
     const allRaw = deduplicateRaw([
@@ -316,76 +316,43 @@ async function scrapeCountry(page, country, idx, total) {
 
 // ─── Unlimited plan scraper ───────────────────────────────────────────────────
 
-async function scrapeUnlimitedPlans(page, rawHtml) {
+async function scrapeUnlimitedPlans(page) {
   const plans = [];
   try {
-    // Extract durations and SSR-default price from the raw HTML <select> in card-999
-    const ssrDurations = [];
-    if (rawHtml) {
-      const card999Idx = rawHtml.indexOf('destination-hero-plan-card-999');
-      if (card999Idx !== -1) {
-        const card999Html = rawHtml.substring(card999Idx, card999Idx + 5000);
-        // <option data-testid="uuid" value="uuid">N days</option>
-        const optRe = /<option[^>]*data-testid="([^"]+)"[^>]*>(\d+)\s*(?:days?|jours?)/gi;
-        let m;
-        while ((m = optRe.exec(card999Html)) !== null) {
-          ssrDurations.push({ testid: m[1], days: parseInt(m[2]) });
-        }
-        // SSR-rendered price (for the currently selected option)
-        const priceMatch =
-          card999Html.match(/pricing-card-original-price[^>]*>US\$([\d.,]+)/) ||
-          card999Html.match(/pricing-card-original-price[^>]*>\$([\d.,]+)/);
-        const selectedOptMatch = card999Html.match(/<option[^>]+selected[^>]*>(\d+)\s*(?:days?|jours?)/i);
-        if (priceMatch && selectedOptMatch) {
-          plans.push({
-            dataGb: null,
-            validityDays: parseInt(selectedOptMatch[1]),
-            price: parseFloat(priceMatch[1].replace(',', '.')),
-            currency: 'USD',
-            isUnlimited: true,
-            _ssrDefault: true,
-          });
-        }
-      }
-    }
-
-    // Use DOM to click each duration option and read the updated price
     const unlimCard = await page.$('[data-testid="destination-hero-plan-card-999"]');
     if (!unlimCard) return plans;
 
-    let durationsToClick = ssrDurations;
-    if (durationsToClick.length === 0) {
-      durationsToClick = await page.evaluate(() => {
-        const sel = document.querySelector(
-          '[data-testid="unlimited-plan-duration-select"] select, [data-testid="destination-hero-plan-card-999"] select'
-        );
-        if (!sel) return [];
-        return [...sel.options].map((o) => ({
-          testid: o.getAttribute('data-testid') || o.value,
-          days: parseInt((o.textContent.match(/\d+/) || ['0'])[0]),
-        })).filter((o) => o.days > 0);
+    // Get all duration options from the <select> inside the unlimited card
+    const options = await page.evaluate(() => {
+      const card = document.querySelector('[data-testid="destination-hero-plan-card-999"]');
+      if (!card) return [];
+      const sel = card.querySelector('select');
+      if (!sel) return [];
+      return [...sel.options].map(o => ({
+        value: o.value,
+        days: parseInt((o.text.match(/\d+/) || ['0'])[0]),
+      })).filter(o => o.days > 0 && o.value);
+    });
+
+    if (options.length === 0) {
+      // No select — read whatever duration/price is currently shown
+      const text = await page.evaluate(() => {
+        const card = document.querySelector('[data-testid="destination-hero-plan-card-999"]');
+        return card ? (card.innerText || '').replace(/\s+/g, ' ') : '';
       });
+      const pm = text.match(/US\$\s*(\d+(?:[.,]\d+)?)/) || text.match(/\$\s*(\d+(?:[.,]\d+)?)/);
+      const dm = text.match(/(\d+)\s*(?:days?|jours?)/i);
+      if (pm && dm) plans.push({ dataGb: null, validityDays: parseInt(dm[1]), price: parseFloat(pm[1].replace(',', '.')), currency: 'USD', isUnlimited: true });
+      return plans;
     }
 
-    const alreadyHaveDays = new Set(plans.map((p) => p.validityDays));
+    const selectSel = '[data-testid="destination-hero-plan-card-999"] select';
 
-    for (const opt of durationsToClick) {
-      if (alreadyHaveDays.has(opt.days)) continue;
+    for (const opt of options) {
       try {
-        await page.evaluate((tid) => {
-          const sel = document.querySelector(
-            '[data-testid="unlimited-plan-duration-select"] select, [data-testid="destination-hero-plan-card-999"] select'
-          );
-          if (!sel) return;
-          for (const o of sel.options) {
-            if (o.getAttribute('data-testid') === tid || o.value === tid) {
-              sel.value = o.value;
-              sel.dispatchEvent(new Event('change', { bubbles: true }));
-              break;
-            }
-          }
-        }, opt.testid);
-        await page.waitForTimeout(500);
+        // Use Playwright's selectOption — properly triggers React state update
+        await page.selectOption(selectSel, opt.value);
+        await page.waitForTimeout(400);
 
         const price = await page.evaluate(() => {
           const card = document.querySelector('[data-testid="destination-hero-plan-card-999"]');
@@ -397,7 +364,6 @@ async function scrapeUnlimitedPlans(page, rawHtml) {
 
         if (price && price > 0) {
           plans.push({ dataGb: null, validityDays: opt.days, price, currency: 'USD', isUnlimited: true });
-          alreadyHaveDays.add(opt.days);
         }
       } catch (_) {}
     }
