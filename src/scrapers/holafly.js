@@ -1,18 +1,28 @@
 /**
  * Holafly scraper (esim.holafly.com)
- * Strategy: DOM scraping via Playwright.
- * Holafly sells UNLIMITED data eSIMs priced by duration (7d / 15d / 30d etc.), in EUR.
  *
- * 1. Load the destination listing page.
- * 2. Collect all country page links (pattern: /esim-[country]/ or /[lang]/esim-[country]/).
- * 3. For each country page, wait for duration+price cards to render and extract them.
- * 4. Process 3 pages in parallel.
+ * Strategy:
+ *  1. Load /shop/ — the full destination listing page.
+ *  2. Dismiss cookie banner, scroll to load all lazy country cards.
+ *  3. Collect all /esim-[country]/ links (filter out regional/utility pages).
+ *  4. For each country page, parse duration + price text patterns.
+ *  5. Process 3 pages in parallel.
+ *
+ * Holafly sells UNLIMITED data plans priced by duration (1d, 3d, 5d, 7d, 10d, 15d, 30d).
+ * Prices are shown in the user's currency (USD on GH Actions US servers, GBP on UK IPs).
  */
 const { chromium } = require('playwright');
 const { toEurUsd } = require('../currency');
 
+const SHOP_URL = 'https://esim.holafly.com/shop/all-destinations/';
 const BASE_URL = 'https://esim.holafly.com';
 const CONCURRENCY = 3;
+
+// Slugs that are not individual countries (regional/utility pages)
+const EXCLUDED_SLUGS = new Set([
+  'esim-rewards-loyalty-program', 'esim-asia', 'esim-europe', 'esim-africa',
+  'esim-americas', 'esim-oceania', 'esim-middle-east', 'esim-caribbean',
+]);
 
 async function scrape() {
   const browser = await chromium.launch({
@@ -32,206 +42,66 @@ async function scrape() {
       extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
     });
 
-    // ── Step 1: collect country links ──────────────────────────────────────
-    console.error('[Holafly] Loading destination list...');
+    // ── Step 1: get country list from /shop/ ──────────────────────────────
+    console.error('[Holafly] Loading shop page...');
     const listPage = await context.newPage();
     let countryLinks = [];
 
-    const listingPaths = ['/', '/en/', '/en/esim/', '/esim/'];
-    for (const path of listingPaths) {
-      try {
-        await listPage.goto(`${BASE_URL}${path}`, {
-          waitUntil: 'domcontentloaded',
-          timeout: 45000,
-        });
-        await listPage.waitForTimeout(6000);
+    try {
+      await listPage.goto(SHOP_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await listPage.waitForTimeout(3000);
 
-        // Wait for any destination link to appear
-        try {
-          await listPage.waitForSelector('a[href*="-esim"], a[href*="/esim-"]', { timeout: 10000 });
-        } catch (_) { /* may not match */ }
-
-        countryLinks = await listPage.$$eval(
-          'a',
-          (els, base) => {
-            const valid = [];
-            for (const el of els) {
-              const href = (el.href || '').split('?')[0].split('#')[0];
-              if (!href.startsWith(base)) continue;
-              // Accept links that contain "-esim" in the slug, or "/esim-" path segment
-              // Exclude top-level nav / utility pages
-              if (
-                href === base ||
-                href === base + '/' ||
-                /\/(blog|faq|about|contact|terms|privacy|support|help|login|register)\/?/.test(href)
-              ) continue;
-              if (
-                href.includes('-esim') ||
-                href.includes('/esim-') ||
-                // e.g. /en/esim-france/
-                /\/esim-[a-z]/.test(href.replace(base, ''))
-              ) {
-                valid.push(href);
-              }
-            }
-            return [...new Set(valid)].slice(0, 250);
-          },
-          BASE_URL
-        );
-
-        if (countryLinks.length > 5) {
-          console.error(`[Holafly] Found ${countryLinks.length} country links from ${path}`);
-          break;
-        }
-      } catch (err) {
-        console.error(`[Holafly] Listing ${path} error: ${err.message}`);
+      // Dismiss cookie banner
+      for (const sel of ['button:has-text("Accept")', 'button:has-text("Got it")', 'button:has-text("Accept all")']) {
+        try { await listPage.click(sel, { timeout: 2000 }); break; } catch (_) {}
       }
+      await listPage.waitForTimeout(500);
+
+      // Scroll to trigger lazy loading of country cards
+      for (let i = 0; i < 12; i++) {
+        await listPage.evaluate(() => window.scrollBy(0, 600));
+        await listPage.waitForTimeout(300);
+      }
+      await listPage.waitForTimeout(1500);
+
+      countryLinks = await listPage.evaluate(({ base, excluded }) => {
+        const links = [...new Set(
+          [...document.querySelectorAll('a')]
+            .map(a => a.href.split('?')[0].split('#')[0])
+            .filter(h => h.startsWith(base + '/esim-'))
+        )];
+        return links.filter(h => {
+          const slug = h.replace(base + '/', '').replace(/\/$/, '');
+          return !excluded.includes(slug);
+        });
+      }, { base: BASE_URL, excluded: [...EXCLUDED_SLUGS] });
+
+      console.error(`[Holafly] Found ${countryLinks.length} country links`);
+    } catch (err) {
+      console.error(`[Holafly] Shop page error: ${err.message}`);
     }
 
     await listPage.close();
-    console.error(`[Holafly] Processing ${countryLinks.length} country pages...`);
 
-    // ── Step 2: scrape each country page in parallel chunks ───────────────
+    if (countryLinks.length === 0) {
+      console.error('[Holafly] No country links found — aborting');
+      return [];
+    }
+
+    // ── Step 2: scrape each country page in parallel ──────────────────────
     for (let i = 0; i < countryLinks.length; i += CONCURRENCY) {
       const chunk = countryLinks.slice(i, i + CONCURRENCY);
 
       await Promise.all(
-        chunk.map(async (href) => {
+        chunk.map(async (href, j) => {
+          const idx = i + j + 1;
           const page = await context.newPage();
           try {
-            await page.goto(href, { waitUntil: 'domcontentloaded', timeout: 35000 });
-
-            // Wait for pricing to render — try several selector patterns
-            const pricingSelectors = [
-              '[class*="duration"]',
-              '[class*="period"]',
-              '[class*="price"]',
-              '[class*="plan"]',
-              '[class*="card"]',
-              '[data-testid*="plan"]',
-              '[data-testid*="duration"]',
-              '[data-testid*="price"]',
-            ];
-            let selectorHit = false;
-            for (const sel of pricingSelectors) {
-              try {
-                await page.waitForSelector(sel, { timeout: 5000 });
-                selectorHit = true;
-                break;
-              } catch (_) { /* try next */ }
+            const plans = await scrapeCountry(page, href, idx, countryLinks.length);
+            for (const p of plans) {
+              const key = `holafly|${p.country_code || p.country}|${p.plan_type}|${p.validity_days}|${p.price_eur}`;
+              if (!seen.has(key)) { seen.add(key); allPlans.push(p); }
             }
-            if (!selectorHit) {
-              await page.waitForTimeout(5000);
-            }
-
-            // ── DOM extraction ───────────────────────────────────────────
-            const rawPlans = await page.evaluate(() => {
-              const results = [];
-
-              // ── Strategy A: structured card elements ──────────────────
-              // Holafly renders each duration option as a card/button with days + price
-              const cardSelectors = [
-                '[class*="duration"]',
-                '[class*="period"]',
-                '[class*="DurationCard"]',
-                '[class*="PeriodCard"]',
-                '[class*="plan-option"]',
-                '[class*="PlanOption"]',
-                '[class*="offer"]',
-                '[data-testid*="plan"]',
-                '[data-testid*="duration"]',
-              ];
-
-              const cards = [];
-              for (const sel of cardSelectors) {
-                cards.push(...document.querySelectorAll(sel));
-              }
-              const uniqueCards = [...new Set(cards)];
-
-              for (const card of uniqueCards) {
-                const text = (card.innerText || card.textContent || '').replace(/\s+/g, ' ').trim();
-                if (!text) continue;
-
-                // Needs a "X days/day" pattern and a price
-                const daysMatch = text.match(/(\d+)\s*(?:day|days|jour|jours|día|días|Tag|Tage|giorni)/i);
-                const priceMatch = text.match(/€\s*(\d+(?:[.,]\d+)?)/) ||
-                                   text.match(/(\d+(?:[.,]\d+)?)\s*€/);
-
-                if (daysMatch && priceMatch) {
-                  results.push({
-                    days: parseInt(daysMatch[1]),
-                    price: parseFloat(priceMatch[1].replace(',', '.')),
-                    source: 'card',
-                  });
-                }
-              }
-
-              // ── Strategy B: page-level text scan (fallback) ───────────
-              if (results.length === 0) {
-                const bodyText = document.body.innerText || '';
-
-                // Pattern: "7 days ... €19" or "€19 ... 7 days" within ~80 chars
-                const fwdRegex = /(\d+)\s*(?:day|days|jour|jours|día|días|Tag|Tage|giorni)[\s\S]{0,80}?€\s*(\d+(?:[.,]\d+)?)/gi;
-                let m;
-                while ((m = fwdRegex.exec(bodyText)) !== null) {
-                  const price = parseFloat(m[2].replace(',', '.'));
-                  if (price > 0) {
-                    results.push({ days: parseInt(m[1]), price, source: 'regex-fwd' });
-                  }
-                }
-
-                const revRegex = /€\s*(\d+(?:[.,]\d+)?)[\s\S]{0,80}?(\d+)\s*(?:day|days|jour|jours|día|días|Tag|Tage|giorni)/gi;
-                while ((m = revRegex.exec(bodyText)) !== null) {
-                  const price = parseFloat(m[1].replace(',', '.'));
-                  if (price > 0) {
-                    results.push({ days: parseInt(m[2]), price, source: 'regex-rev' });
-                  }
-                }
-              }
-
-              // Deduplicate by (days, price)
-              const seen = new Set();
-              return results.filter(({ days, price }) => {
-                const key = `${days}|${price}`;
-                if (seen.has(key)) return false;
-                seen.add(key);
-                return days > 0 && price > 0;
-              });
-            });
-
-            // Resolve country name from URL
-            const slug = href.replace(/\/$/, '').split('/').pop() || '';
-            // Handles patterns: esim-france, france-esim, esim-united-states
-            const countryName = slug
-              .replace(/^esim-/, '')
-              .replace(/-esim$/, '')
-              .replace(/-/g, ' ')
-              .replace(/\b\w/g, (c) => c.toUpperCase());
-
-            const plans = [];
-            for (const raw of rawPlans) {
-              if (!raw.price || raw.price <= 0 || !raw.days) continue;
-              const { price_eur, price_usd } = await toEurUsd(raw.price, 'EUR');
-              plans.push({
-                provider: 'holafly',
-                country: countryName,
-                country_code: '',
-                region: '',
-                plan_name: `Unlimited / ${raw.days}d`,
-                data_gb: null,
-                plan_type: 'unlimited',
-                validity_days: raw.days,
-                price_eur,
-                price_usd,
-              });
-            }
-
-            const totalSoFar = i + chunk.indexOf(href) + 1;
-            console.error(`[Holafly] [${totalSoFar}/${countryLinks.length}] ${countryName} — ${plans.length} plans`);
-
-            addUnique(allPlans, seen, plans);
-          } catch (err) {
-            console.error(`[Holafly] Error on ${href}: ${err.message}`);
           } finally {
             await page.close();
           }
@@ -246,15 +116,88 @@ async function scrape() {
   return allPlans;
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+async function scrapeCountry(page, href, idx, total) {
+  const slug = href.replace(BASE_URL + '/', '').replace(/\/$/, '');
+  const countryName = slug
+    .replace(/^esim-/, '')
+    .replace(/-/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase());
 
-function addUnique(allPlans, seen, plans) {
-  for (const p of plans) {
-    const key = `${p.provider}|${p.country_code || p.country}|${p.data_gb}|${p.validity_days}|${p.price_eur}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      allPlans.push(p);
+  try {
+    await page.goto(href, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(4000);
+
+    // Dismiss cookie banner if present
+    for (const sel of ['button:has-text("Accept")', 'button:has-text("Got it")']) {
+      try { await page.click(sel, { timeout: 1500 }); break; } catch (_) {}
     }
+
+    const rawPlans = await page.evaluate(() => {
+      const text = document.body.innerText || '';
+      const results = [];
+
+      // Pattern A: "N days\t£/$/€ PRICE" (tab-separated, Holafly's main format)
+      // e.g. "3 days\t£ 8.99GBP"  or  "7 days\t$ 19.99"  or  "1 day\t€ 5.99"
+      const tabRegex = /(\d+)\s*days?\s*[\t ]+([£$€])\s*(\d+(?:[.,]\d+)?)/gi;
+      let m;
+      while ((m = tabRegex.exec(text)) !== null) {
+        const price = parseFloat(m[3].replace(',', '.'));
+        if (price > 0) {
+          results.push({
+            days: parseInt(m[1]),
+            price,
+            currency: m[2] === '£' ? 'GBP' : m[2] === '$' ? 'USD' : 'EUR',
+          });
+        }
+      }
+
+      // Pattern B: "N days … PRICE" within 80 chars (fallback)
+      if (results.length === 0) {
+        const fwd = /(\d+)\s*days?[\s\S]{0,80}?([£$€])\s*(\d+(?:[.,]\d+)?)/gi;
+        while ((m = fwd.exec(text)) !== null) {
+          const price = parseFloat(m[3].replace(',', '.'));
+          if (price > 0) results.push({ days: parseInt(m[1]), price, currency: m[2] === '£' ? 'GBP' : m[2] === '$' ? 'USD' : 'EUR' });
+        }
+      }
+
+      // Deduplicate by (days, price)
+      const seen = new Set();
+      return results.filter(r => {
+        const k = `${r.days}|${r.price}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+    });
+
+    if (rawPlans.length === 0) {
+      console.error(`[Holafly] [${idx}/${total}] ${countryName} — 0 plans`);
+      return [];
+    }
+
+    const plans = await Promise.all(
+      rawPlans.map(async (raw) => {
+        const { price_eur, price_usd } = await toEurUsd(raw.price, raw.currency);
+        return {
+          provider: 'holafly',
+          country: countryName,
+          country_code: '',
+          region: '',
+          plan_name: `Unlimited / ${raw.days}d`,
+          data_gb: null,
+          plan_type: 'unlimited',
+          validity_days: raw.days,
+          price_eur,
+          price_usd,
+        };
+      })
+    );
+
+    console.error(`[Holafly] [${idx}/${total}] ${countryName} — ${plans.length} plans`);
+    return plans;
+  } catch (err) {
+    console.error(`[Holafly] [${idx}/${total}] ${countryName} error: ${err.message}`);
+    return [];
   }
 }
 
