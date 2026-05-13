@@ -867,6 +867,21 @@ body {
   letter-spacing: 0.02em;
 }
 
+/* Holafly unlimited reference shown in data-plan rows */
+.gap-cell--ref {
+  background: #fdf4ff !important;
+  color: #9333ea;
+  font-size: 12px;
+  font-weight: 500;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.ref-unlim {
+  font-weight: 700;
+  margin-right: 2px;
+  font-size: 11px;
+}
+
 /* ------------------------------------------------------------------
    Provider header with dot
    ------------------------------------------------------------------ */

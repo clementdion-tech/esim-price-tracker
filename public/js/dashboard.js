@@ -305,6 +305,14 @@ function buildTable(countryCode, specs, changeIndex) {
     daily:     '<span class="badge-pill badge-daily">Daily</span>',
   };
 
+  // Build a lookup: validity_days → holafly unlimited price (for reference in data rows)
+  const hfUnlimitedByDuration = {};
+  for (const s of specs) {
+    if (s.plan_type === 'unlimited' && s.by_provider['holafly']) {
+      hfUnlimitedByDuration[String(s.validity_days)] = s.by_provider['holafly'];
+    }
+  }
+
   const rows = specs.map((spec) => {
     // Find min/max EUR and USD prices across providers that have actual prices
     const eurPrices = PROVIDERS.map((p) => spec.by_provider[p]?.price_eur).filter((x) => x > 0);
@@ -316,11 +324,22 @@ function buildTable(countryCode, specs, changeIndex) {
 
     const typeBadge = TYPE_BADGES[spec.plan_type] || '';
 
+    // For data plan rows: find Holafly's unlimited reference price for the same duration
+    const hfRef = spec.plan_type === 'data'
+      ? hfUnlimitedByDuration[String(spec.validity_days)]
+      : null;
+
     const cells = PROVIDERS.map((p) => {
       const plan = spec.by_provider[p];
       const isKolet = p === 'kolet';
 
       if (!plan || !plan.price_eur) {
+        // Holafly data-plan gap: show unlimited reference price with ∞ label
+        if (p === 'holafly' && hfRef) {
+          return `<td class="gap-cell gap-cell--ref" colspan="2" title="Holafly unlimited plan for same duration">
+            <span class="ref-unlim">∞</span> €${Number(hfRef.price_eur).toFixed(2)}
+          </td>`;
+        }
         return `<td class="gap-cell${isKolet ? ' kolet-col' : ''}" colspan="2">—</td>`;
       }
 
