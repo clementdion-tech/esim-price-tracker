@@ -164,7 +164,7 @@ const COUNTRY_ALIASES = {
 
 // Holafly city-level slugs to exclude from the comparison matrix
 // (these don't correspond to countries and won't match other providers)
-const CITY_PATTERNS = /^(aaland|abidjan|abu dhabi city|agadir|alaska$|alanya|alberta|alicante|almaty|amman|amsterdam city|antalya city|antalya|alaska cruise|caribbean cruise|europe cruise|mediterranean cruise)$/i;
+const CITY_PATTERNS = /^(aaland islands?|åland islands?|abidjan|abu dhabi city|agadir|alaska$|alanya|alberta|alicante|almaty|amman|amsterdam city|antalya city|antalya|alaska cruise|caribbean cruise|europe cruise|mediterranean cruise)$/i;
 
 /**
  * Normalise a country/destination name for grouping.
