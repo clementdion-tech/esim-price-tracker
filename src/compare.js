@@ -5,6 +5,9 @@
  * - Plans added or removed
  */
 
+const { COUNTRY_ISO2 } = require('./lib/countryData');
+const { isCityEntry, normalizeCountryName, canonicalName } = require('./lib/utils');
+
 const COMPETITOR_PROVIDERS = ['airalo', 'saily', 'holafly'];
 
 function compare(previousPlans, freshPlans) {
@@ -130,172 +133,13 @@ function buildCountrySet(plans) {
   return map;
 }
 
-// Known country name aliases — maps provider-specific names to canonical display name
-const COUNTRY_ALIASES = {
-  'usa': 'United States',
-  'united states of america': 'United States',
-  'arab emirates': 'United Arab Emirates',
-  'uae': 'United Arab Emirates',
-  'uk': 'United Kingdom',
-  'great britain': 'United Kingdom',
-  'macau': 'Macao',
-  'east timor': 'Timor-Leste',
-  'timor - leste': 'Timor-Leste',
-  'democratic republic of congo': 'Democratic Republic of the Congo',
-  'democratic republic of the congo': 'Democratic Republic of the Congo',
-  'drc': 'Democratic Republic of the Congo',
-  'republic of the congo': 'Republic of Congo',
-  'north macedonia': 'North Macedonia',
-  'macedonia': 'North Macedonia',
-  'cote d ivoire': "Côte d'Ivoire",
-  "cote d'ivoire": "Côte d'Ivoire",
-  'ivory coast': "Côte d'Ivoire",
-  'sint maarten': 'Sint Maarten (Dutch Part)',
-  'us virgin islands': 'Virgin Islands (U.S.)',
-  'faroe': 'Faroe Islands',
-  'faeroe islands': 'Faroe Islands',
-  'us vi': 'Virgin Islands (U.S.)',
-  'caribbean cruise': 'Caribbean (Multi-country)',
-  'alaska cruise': 'Alaska Cruise',
-  'europe cruise': 'Europe (Multi-country)',
-  'mediterranean cruise': 'Mediterranean Cruise',
-  'latin america': 'Latin America',
-  'latin america and caribbean': 'Latin America',
-  'americas': 'Americas',
-  // Fix split rows
-  'palestine, state of': 'Palestine',
-  'guinea bissau': 'Guinea-Bissau',
-  'saint barthelemy': 'Saint Barthélemy',
-  'saint vincent and grenadines': 'Saint Vincent and the Grenadines',
-  'u.s. virgin islands': 'Virgin Islands (U.S.)',
-  'curacao': 'Curaçao',
-  'reunion': 'Réunion',
-  'bonaire, sint eustatius and saba': 'Bonaire',
-  'saint martin (french part)': 'Saint Martin',
-  // Extra common variants
-  'antigua and barbuda': 'Antigua and Barbuda',
-  'trinidad and tobago': 'Trinidad and Tobago',
-  'south georgia': 'South Georgia and the South Sandwich Islands',
-};
-
-// ISO-2 overrides for countries where no provider supplies a 2-letter code
-// Keyed on canonical display name (lowercase)
-const COUNTRY_ISO2 = {
-  // Standard ISO-2 missing from provider raw data
-  'belarus': 'BY',
-  'bhutan': 'BT',
-  'lebanon': 'LB',
-  'vatican city': 'VA',
-  'ethiopia': 'ET',
-  'palestine': 'PS',
-  'virgin islands (u.s.)': 'VI',
-  'bonaire': 'BQ',
-  'réunion': 'RE',
-  'saint barthélemy': 'BL',
-  'saint martin': 'MF',
-  'guinea-bissau': 'GW',
-  'saint vincent and the grenadines': 'VC',
-  'antigua and barbuda': 'AG',
-  'turks and caicos islands': 'TC',
-  'trinidad and tobago': 'TT',
-  'faroe islands': 'FO',
-  'macao': 'MO',
-  'timor-leste': 'TL',
-  'north macedonia': 'MK',
-  'curaçao': 'CW',
-  'sint maarten (dutch part)': 'SX',
-  "côte d'ivoire": 'CI',
-  'democratic republic of the congo': 'CD',
-  'republic of congo': 'CG',
-  // Territories — use parent country flag
-  'azores': 'PT',
-  'madeira': 'PT',
-  'canary islands': 'ES',
-  'marie-galante': 'FR',
-  'scotland': 'GB',
-  'northern cyprus': 'CY',
-  'saba': 'BQ',
-  'sint eustatius': 'BQ',
-  'netherlands antilles': 'AN',
-  // Regional bundles — use EU/globe pseudo-codes handled by flagEmoji()
-  'europe': 'EU',
-  'eastern europe': 'EU',
-  'scandinavia': 'EU',
-  'balkans': 'EU',
-  'middle east and north africa': '__GLOBE__',
-  'asia': '__GLOBE__',
-  'oceania 1': '__GLOBE__',
-  'oceania': '__GLOBE__',
-  'global': '__GLOBE__',
-  'north america': '__GLOBE__',
-  'latin america': '__GLOBE__',
-  'central america': '__GLOBE__',
-  'caribbean': '__GLOBE__',
-  'caribbean (multi-country)': '__GLOBE__',
-  'africa 1': '__GLOBE__',
-  'africa 2': '__GLOBE__',
-  'africa': '__GLOBE__',
-  'africa safari': '__GLOBE__',
-  'asia and oceania': '__GLOBE__',
-  'caribbean islands': '__GLOBE__',
-  'middle east': '__GLOBE__',
-  'european union and united kingdom': 'EU',
-  'eu plus uk': 'EU',
-  'southeast asia': '__GLOBE__',
-  'china hong kong macau': 'CN',
-  'japan china': 'JP',
-  'japan south korea': 'JP',
-};
-
-// Holafly city-level slugs to exclude from the comparison matrix
-// (these don't correspond to countries and won't match other providers)
-const CITY_PATTERNS = /^(aaland islands?|åland islands?|abidjan|abu dhabi city|agadir|alaska|alanya|alberta|alicante|almaty|amman|amsterdam city|antalya city|antalya|alaska cruise|caribbean cruise|europe cruise|mediterranean cruise)$/i;
-
-/**
- * Normalise a country/destination name for grouping.
- * Applies alias mapping then lowercase+trim.
- */
-function normalizeCountryName(name) {
-  const lower = (name || '').toLowerCase().trim().replace(/\t/g, ' ').replace(/\s+/g, ' ');
-  const alias = COUNTRY_ALIASES[lower];
-  return alias ? alias.toLowerCase() : lower;
-}
-
-/**
- * Returns the canonical display name (title-cased alias or original).
- */
-function canonicalName(name) {
-  const lower = (name || '').toLowerCase().trim().replace(/\t/g, ' ').replace(/\s+/g, ' ');
-  return COUNTRY_ALIASES[lower] || name.trim().replace(/\t/g, ' ');
-}
-
-/**
- * Returns true if this is a city/cruise entry that should not appear in the
- * country comparison (Holafly includes city-level destinations).
- */
-function isCityEntry(name) {
-  return CITY_PATTERNS.test((name || '').trim());
-}
-
-/**
- * Round a GB value to the nearest standard plan size.
- * e.g. 4.88 → 5, 0.98 → 1, 9.77 → 10
- */
-function roundToStandardGb(gb) {
-  if (gb === null || gb === undefined) return null;
-  const standards = [0.5, 1, 1.5, 2, 3, 5, 7, 10, 15, 20, 25, 30, 50, 100];
-  return standards.reduce((prev, curr) =>
-    Math.abs(curr - gb) < Math.abs(prev - gb) ? curr : prev
-  );
-}
-
 /**
  * Return the best available ISO-2 country code from a set of plans for the same country.
- * Preference order: 2-letter > first 2 chars of 3-letter > empty.
+ * Preference order: COUNTRY_ISO2 override > 2-letter raw code > empty.
  */
-function bestCountryCode(plans, canonicalName) {
+function bestCountryCode(plans, canonical) {
   // 1. Try override map first (keyed on canonical display name)
-  const override = COUNTRY_ISO2[(canonicalName || '').toLowerCase()];
+  const override = COUNTRY_ISO2[(canonical || '').toLowerCase()];
   if (override) return override;
   // 2. Try proper 2-letter ISO code from any provider's raw data
   for (const p of plans) {
@@ -319,15 +163,11 @@ function buildComparisonMatrix(plans) {
     // Skip city-level entries — they only exist in Holafly and clutter the comparison
     if (isCityEntry(plan.country)) continue;
 
-    // Round GB to nearest standard size for display consistency
-    const displayGb = roundToStandardGb(plan.data_gb);
-    const normalizedPlan = { ...plan, data_gb: displayGb };
-
     const key = normalizeCountryName(plan.country);
     if (!key) continue;
     if (!byCountry.has(key)) {
       byCountry.set(key, {
-        country: canonicalName(plan.country),  // use alias display name
+        country: canonicalName(plan.country),
         country_code: '',
         region: plan.region || '',
         plans: [],
@@ -337,7 +177,7 @@ function buildComparisonMatrix(plans) {
     // Always use canonical name
     entry.country = canonicalName(entry.country);
     if (!entry.region && plan.region) entry.region = plan.region;
-    entry.plans.push(normalizedPlan);
+    entry.plans.push(plan);
   }
 
   // Resolve the best ISO-2 code for each country group
@@ -400,9 +240,9 @@ function buildComparisonMatrix(plans) {
 function formatPlanLabel(plan) {
   if (plan.plan_type === 'unlimited') return `Unlimited / ${plan.validity_days}d`;
   if (plan.plan_type === 'daily') return `Daily pass / ${plan.validity_days}d`;
-  const rounded = roundToStandardGb(plan.data_gb);
-  const gb = rounded >= 1 ? `${rounded}GB` : `${Math.round(rounded * 1024)}MB`;
-  return `${gb} / ${plan.validity_days}d`;
+  const gb = plan.data_gb;
+  const display = gb >= 1 ? `${gb}GB` : `${Math.round(gb * 1024)}MB`;
+  return `${display} / ${plan.validity_days}d`;
 }
 
 function sortSpecs(a, b) {

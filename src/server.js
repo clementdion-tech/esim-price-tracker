@@ -16,21 +16,48 @@ app.use(express.static(path.join(__dirname, '../public')));
 
 function readJson(file, fallback) {
   try {
-    if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch (_) {}
+    if (fs.existsSync(file)) {
+      const raw = fs.readFileSync(file, 'utf8');
+      return JSON.parse(raw);
+    }
+  } catch (err) {
+    console.error(`[server] Failed to read ${file}:`, err.message);
+  }
   return fallback;
 }
+
+// In-memory cache for the built matrix (invalidated after 60 s)
+let matrixCache = null;
+let matrixCacheAt = 0;
+const MATRIX_CACHE_TTL = 60 * 1000; // 60 seconds
 
 app.get('/health', (_, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
 
 app.get('/api/data', (_, res) => {
-  const current = readJson(CURRENT_FILE, { scraped_at: null, plans: [] });
+  let current;
+  try {
+    current = readJson(CURRENT_FILE, { scraped_at: null, plans: [] });
+    if (!Array.isArray(current.plans)) {
+      console.error('[server] current.json is malformed — plans is not an array, using empty fallback');
+      current = { scraped_at: null, plans: [] };
+    }
+  } catch (err) {
+    console.error('[server] Unexpected error reading current.json:', err.message);
+    current = { scraped_at: null, plans: [] };
+  }
+
   const history = readJson(HISTORY_FILE, { changes: [], new_countries: [] });
 
-  const matrix = buildComparisonMatrix(current.plans);
+  // Use cached matrix if still fresh
+  const now = Date.now();
+  if (!matrixCache || now - matrixCacheAt > MATRIX_CACHE_TTL) {
+    matrixCache = buildComparisonMatrix(current.plans);
+    matrixCacheAt = now;
+  }
+  const matrix = matrixCache;
 
   // Recent price changes (last 90 days, competitors only)
-  const cutoff = new Date(Date.now() - 90 * 24 * 3600 * 1000).toISOString();
+  const cutoff = new Date(now - 90 * 24 * 3600 * 1000).toISOString();
   const recentChanges = (history.changes || [])
     .filter((c) => c.detected_at >= cutoff)
     .sort((a, b) => b.detected_at.localeCompare(a.detected_at));

@@ -698,17 +698,24 @@ body {
 .country-header-chevron.open { transform: rotate(180deg); }
 
 .country-body {
-  display: none;
-  overflow-x: auto;
-  border-top: 1px solid var(--border-sm);
+  display: grid;
+  grid-template-rows: 0fr;
+  overflow: hidden;
+  border-top: 0px solid var(--border-sm);
   scrollbar-width: thin;
+  transition: grid-template-rows 200ms ease, border-top-width 200ms ease;
 }
+
+.country-body > * { overflow-x: auto; min-height: 0; }
 
 .country-body::-webkit-scrollbar { height: 4px; }
 .country-body::-webkit-scrollbar-track { background: transparent; }
 .country-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
-.country-body.open { display: block; }
+.country-body.open {
+  grid-template-rows: 1fr;
+  border-top-width: 1px;
+}
 
 /* ------------------------------------------------------------------
    Comparison table
@@ -742,14 +749,6 @@ body {
 .comparison-table tbody tr:nth-child(odd) td { background: var(--bg-row-alt); }
 .comparison-table tbody tr:nth-child(even) td { background: #fff; }
 .comparison-table tbody tr:hover td { background: #f0f4ff !important; }
-
-/* Override for Kolet column */
-.comparison-table tbody td.td-kolet {
-  background: var(--kolet-col-bg) !important;
-}
-.comparison-table tbody tr:hover td.td-kolet {
-  background: #ebe9fd !important;
-}
 
 .comparison-table tbody td {
   padding: 9px 14px;
@@ -789,9 +788,6 @@ body {
 .badge-data-sm     { background: #eff6ff; color: #1d4ed8; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; }
 .badge-unlimited-sm{ background: #f0fdf4; color: #15803d; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; }
 .badge-daily-sm    { background: #faf5ff; color: #7e22ce;  font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; }
-
-/* Price cell (legacy, kept for safety) */
-.price-cell { text-align: center; }
 
 /* Individual EUR / USD cells (new split-column layout) */
 .price-eur-cell,
@@ -841,22 +837,6 @@ body {
 .kolet-col {
   background: rgba(99, 102, 241, 0.04) !important;
 }
-
-/* Price changed */
-.cell-changed { background: var(--amber-bg) !important; }
-
-/* Change badge inside price cell */
-.price-change-badge {
-  display: inline-block;
-  font-size: 9px;
-  font-weight: 700;
-  padding: 1px 4px;
-  border-radius: 3px;
-  margin-top: 2px;
-}
-
-.price-change-badge--down { background: var(--green-bg); color: #15803d; }
-.price-change-badge--up   { background: var(--red-bg);   color: #dc2626; }
 
 /* Gap cell */
 .gap-cell {

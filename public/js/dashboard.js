@@ -43,7 +43,27 @@ function renderAll() {
   renderStats();
   renderChanges();
   renderNewCountries();
+
+  // Preserve active filter values across re-renders (e.g. on Refresh)
+  const prevCountry = document.getElementById('filter-country')?.value ?? '';
+  const prevRegion  = document.getElementById('filter-region')?.value ?? '';
+  const prevDays    = document.getElementById('filter-days')?.value ?? '';
+  const prevGb      = document.getElementById('filter-gb')?.value ?? '';
+  const prevGaps    = document.getElementById('filter-gaps')?.checked ?? false;
+
   populateFilters();
+
+  // Restore values after populateFilters() rebuilds the region <select>
+  document.getElementById('filter-country').value = prevCountry;
+  const regionSel = document.getElementById('filter-region');
+  // Only restore if the previously-selected option still exists in the new list
+  if ([...regionSel.options].some((o) => o.value === prevRegion)) {
+    regionSel.value = prevRegion;
+  }
+  document.getElementById('filter-days').value  = prevDays;
+  document.getElementById('filter-gb').value    = prevGb;
+  document.getElementById('filter-gaps').checked = prevGaps;
+
   renderMatrix();
   document.getElementById('loading').classList.add('d-none');
 }
@@ -240,7 +260,9 @@ function renderMatrix() {
     if (specs.length === 0) continue;
 
     visibleCount++;
-    const id = `country-${(row.country_code || row.country).replace(/\W+/g, '-')}`;
+    // Use country NAME for the ID (not country_code) — multiple countries share
+    // codes like __GLOBE__ or EU which would produce duplicate DOM ids.
+    const id = `country-${row.country.toLowerCase().replace(/\W+/g, '-').replace(/^-|-$/g, '')}`;
 
     const totalGaps = specs.reduce((acc, s) => acc + (s.gap_count || 0), 0);
     const gapChip   = totalGaps > 0

@@ -28,7 +28,7 @@ const { isUtilitySlug } = require('../lib/utils');
 const { chromium } = require('playwright-extra');
 const stealth = require('puppeteer-extra-plugin-stealth');
 chromium.use(stealth());
-const { toEurUsd } = require('../currency');
+const { addUnique, buildPlan, launchBrowser } = require('../lib/scraperUtils');
 
 const BASE_URL = 'https://saily.com';
 const ALL_DESTINATIONS = 'https://saily.com/en/all-destinations/';
@@ -37,15 +37,7 @@ const CONCURRENCY = 3;
 // ─── Main export ─────────────────────────────────────────────────────────────
 
 async function scrape() {
-  const browser = await chromium.launch({
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-blink-features=AutomationControlled',
-    ],
-  });
+  const browser = await launchBrowser(chromium, ['--disable-blink-features=AutomationControlled']);
 
   const allPlans = [];
   const seen = new Set();
@@ -159,27 +151,27 @@ async function scrape() {
     }
 
     // ── Step 2: Scrape each country page ──────────────────────────────────
-    const sampleLimit = process.env.SCRAPE_SAMPLE ? parseInt(process.env.SCRAPE_SAMPLE) : Infinity;
-    const countriesToScrape = countries.slice(0, sampleLimit);
+    const limit = parseInt(process.env.SCRAPE_SAMPLE || 'Infinity');
+    const countriesToScrape = countries.slice(0, limit);
 
     for (let i = 0; i < countriesToScrape.length; i += CONCURRENCY) {
       const chunk = countriesToScrape.slice(i, i + CONCURRENCY);
 
-      await Promise.all(
+      const chunkResults = await Promise.all(
         chunk.map(async (country, j) => {
           const idx = i + j + 1;
           const page = await context.newPage();
           try {
-            const plans = await scrapeCountry(page, country, idx, countries.length);
-            for (const p of plans) {
-              const key = `saily|${p.country_code || p.country}|${p.data_gb}|${p.validity_days}|${p.price_eur}`;
-              if (!seen.has(key)) { seen.add(key); allPlans.push(p); }
-            }
+            return await scrapeCountry(page, country, idx, countries.length);
           } finally {
             await page.close();
           }
         })
       );
+
+      for (const plans of chunkResults) {
+        addUnique(allPlans, seen, plans);
+      }
     }
   } finally {
     await browser.close();
@@ -297,21 +289,18 @@ async function scrapeCountry(page, country, idx, total) {
     }
 
     const plans = await Promise.all(
-      allRaw.map(async (raw) => {
-        const { price_eur, price_usd } = await toEurUsd(raw.price, raw.currency);
-        return {
+      allRaw.map((raw) =>
+        buildPlan({
           provider: 'saily',
           country: country.countryName,
           country_code: country.isoCode,
           region: '',
-          plan_name: `${raw.dataGb === null ? 'Unlimited' : raw.dataGb + 'GB'} / ${raw.validityDays}d`,
-          data_gb: raw.dataGb,
-          plan_type: raw.dataGb === null ? 'unlimited' : 'data',
-          validity_days: raw.validityDays,
-          price_eur,
-          price_usd,
-        };
-      })
+          dataGb: raw.dataGb,
+          validityDays: raw.validityDays,
+          price: raw.price,
+          currency: raw.currency,
+        })
+      )
     );
 
     console.error(`[Saily] [${idx}/${total}] ${country.countryName} — ${plans.length} plans`);

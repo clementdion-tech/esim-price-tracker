@@ -1,3 +1,5 @@
+const { COUNTRY_ALIASES } = require('./countryData');
+
 /**
  * Returns true if the slug is a utility/marketing page, not an eSIM destination.
  * Used by all scrapers to skip non-plan pages during country listing.
@@ -26,4 +28,33 @@ function isHolaflyCity(slug) {
   );
 }
 
-module.exports = { isUtilitySlug, isHolaflyCity };
+// Holafly city-level display names (non-slug form) to exclude from the comparison matrix.
+const CITY_PATTERNS = /^(aaland islands?|åland islands?|abidjan|abu dhabi city|agadir|alaska|alanya|alberta|alicante|almaty|amman|amsterdam city|antalya city|antalya|alaska cruise|caribbean cruise|europe cruise|mediterranean cruise)$/i;
+
+/**
+ * Returns true if this is a city/cruise display name that should not appear in
+ * the country comparison matrix (Holafly includes city-level destinations).
+ */
+function isCityEntry(name) {
+  return CITY_PATTERNS.test((name || '').trim());
+}
+
+/**
+ * Normalise a country/destination name for grouping.
+ * Applies alias mapping then lowercase+trim.
+ */
+function normalizeCountryName(name) {
+  const lower = (name || '').toLowerCase().trim().replace(/\t/g, ' ').replace(/\s+/g, ' ');
+  const alias = COUNTRY_ALIASES[lower];
+  return alias ? alias.toLowerCase() : lower;
+}
+
+/**
+ * Returns the canonical display name (title-cased alias or original).
+ */
+function canonicalName(name) {
+  const lower = (name || '').toLowerCase().trim().replace(/\t/g, ' ').replace(/\s+/g, ' ');
+  return COUNTRY_ALIASES[lower] || name.trim().replace(/\t/g, ' ');
+}
+
+module.exports = { isUtilitySlug, isHolaflyCity, isCityEntry, normalizeCountryName, canonicalName };

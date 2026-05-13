@@ -17,7 +17,7 @@
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 
 const MAX_ATTEMPTS = 3;
-const MIN_PLANS = 1;
+const MIN_PLANS = 5;
 // These fields must be non-null on every plan
 const REQUIRED_FIELDS = ['provider', 'country', 'price_eur', 'price_usd'];
 // At least 3 of these "detail" fields must be non-null
@@ -114,7 +114,23 @@ function validatePlans(plans, scraperName) {
 function printSamplePlans(plans, n = 2) {
   const samples = plans.slice(0, n);
   for (const [i, plan] of samples.entries()) {
-    console.log(`    Sample plan ${i + 1}:`, JSON.stringify(plan, null, 6).replace(/\n/g, '\n    '));
+    const data  = plan.data_gb === null ? 'unlimited' : `${plan.data_gb} GB`;
+    const days  = plan.validity_days ? `${plan.validity_days}d` : '?d';
+    const price = plan.price_eur != null ? `€${Number(plan.price_eur).toFixed(2)}` : '—';
+    const usd   = plan.price_usd != null ? ` / $${Number(plan.price_usd).toFixed(2)}` : '';
+    const type  = plan.plan_type ? `[${plan.plan_type}]` : '';
+    console.log(`    Sample ${i + 1}: ${plan.country} — ${data} / ${days}  ${price}${usd}  ${type}  "${plan.plan_name || ''}"`);
+  }
+}
+
+/**
+ * Warn (but do not fail) if no unlimited plans are present in the result set.
+ * Expected for Airalo and Saily in sample mode.
+ */
+function warnIfNoUnlimited(name, plans) {
+  const hasUnlimited = plans.some((p) => p.plan_type === 'unlimited' || p.data_gb === null);
+  if (!hasUnlimited) {
+    console.log(`  [${name}] WARN — no unlimited plans found in result set`);
   }
 }
 
@@ -195,6 +211,7 @@ async function main() {
 
     if (result.passed) {
       console.log(`\n  PASS — ${result.planCount} plans (succeeded on attempt ${result.attempt})`);
+      warnIfNoUnlimited(name, result.plans);
       printSamplePlans(result.plans, 2);
     } else {
       console.log(`\n  FAIL — ${result.planCount} plans after ${MAX_ATTEMPTS} attempts`);

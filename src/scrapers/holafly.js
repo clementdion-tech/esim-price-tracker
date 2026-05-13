@@ -13,7 +13,7 @@
  */
 const axios = require('axios');
 const { chromium } = require('playwright');
-const { toEurUsd } = require('../currency');
+const { addUnique, buildPlan, launchBrowser } = require('../lib/scraperUtils');
 const { isUtilitySlug, isHolaflyCity } = require('../lib/utils');
 
 const BASE_URL = 'https://esim.holafly.com';
@@ -68,10 +68,7 @@ async function getCountryLinks() {
 }
 
 async function scrape() {
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-  });
+  const browser = await launchBrowser(chromium);
 
   const allPlans = [];
   const seen = new Set();
@@ -100,26 +97,26 @@ async function scrape() {
     });
 
     // ── Step 2: scrape each country page in parallel ──────────────────────
-    const sampleLimit = process.env.SCRAPE_SAMPLE ? parseInt(process.env.SCRAPE_SAMPLE) : Infinity;
-    const linksToScrape = countryLinks.slice(0, sampleLimit);
+    const limit = parseInt(process.env.SCRAPE_SAMPLE || 'Infinity');
+    const linksToScrape = countryLinks.slice(0, limit);
     for (let i = 0; i < linksToScrape.length; i += CONCURRENCY) {
       const chunk = linksToScrape.slice(i, i + CONCURRENCY);
 
-      await Promise.all(
+      const chunkResults = await Promise.all(
         chunk.map(async (href, j) => {
           const idx = i + j + 1;
           const page = await context.newPage();
           try {
-            const plans = await scrapeCountry(page, href, idx, countryLinks.length);
-            for (const p of plans) {
-              const key = `holafly|${p.country_code || p.country}|${p.plan_type}|${p.validity_days}|${p.price_eur}`;
-              if (!seen.has(key)) { seen.add(key); allPlans.push(p); }
-            }
+            return await scrapeCountry(page, href, idx, countryLinks.length);
           } finally {
             await page.close();
           }
         })
       );
+
+      for (const plans of chunkResults) {
+        addUnique(allPlans, seen, plans);
+      }
     }
   } finally {
     await browser.close();
@@ -189,21 +186,18 @@ async function scrapeCountry(page, href, idx, total) {
     }
 
     const plans = await Promise.all(
-      rawPlans.map(async (raw) => {
-        const { price_eur, price_usd } = await toEurUsd(raw.price, raw.currency);
-        return {
+      rawPlans.map((raw) =>
+        buildPlan({
           provider: 'holafly',
           country: countryName,
           country_code: '',
           region: '',
-          plan_name: `Unlimited / ${raw.days}d`,
-          data_gb: null,
-          plan_type: 'unlimited',
-          validity_days: raw.days,
-          price_eur,
-          price_usd,
-        };
-      })
+          dataGb: null,
+          validityDays: raw.days,
+          price: raw.price,
+          currency: raw.currency,
+        })
+      )
     );
 
     console.error(`[Holafly] [${idx}/${total}] ${countryName} — ${plans.length} plans`);

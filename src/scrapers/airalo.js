@@ -12,7 +12,7 @@
 
 const axios = require('axios');
 const { chromium } = require('playwright');
-const { toEurUsd } = require('../currency');
+const { addUnique, buildPlan, launchBrowser } = require('../lib/scraperUtils');
 
 const BASE_URL = 'https://www.airalo.com';
 const COUNTRIES_API = 'https://www.airalo.com/api/v4/countries';
@@ -28,10 +28,7 @@ async function scrape() {
   const allDestinations = [...countries, ...regions];
   console.error(`[Airalo] ${countries.length} countries + ${regions.length} regions = ${allDestinations.length} total`);
 
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-  });
+  const browser = await launchBrowser(chromium);
 
   const allPlans = [];
   const seen = new Set();
@@ -46,8 +43,8 @@ async function scrape() {
     });
 
     // Respect SCRAPE_SAMPLE env var (set by test.js --sample=N for fast CI validation)
-    const sampleLimit = process.env.SCRAPE_SAMPLE ? parseInt(process.env.SCRAPE_SAMPLE) : Infinity;
-    const countriesToScrape = allDestinations.slice(0, sampleLimit);
+    const limit = parseInt(process.env.SCRAPE_SAMPLE || 'Infinity');
+    const countriesToScrape = allDestinations.slice(0, limit);
 
     // Process in chunks of CONCURRENCY (4 parallel pages)
     for (let i = 0; i < countriesToScrape.length; i += CONCURRENCY) {
@@ -125,22 +122,19 @@ async function scrapeCountryPage(page, country, idx, total) {
 
     // Convert prices outside page.evaluate (toEurUsd is async)
     const plans = await Promise.all(
-      rawPlans.map(async (raw) => {
-        const { price_eur, price_usd } = await toEurUsd(raw.price, raw.currency);
-        return {
+      rawPlans.map((raw) =>
+        buildPlan({
           provider: 'airalo',
           country: country.title,
           country_code: String(country.slug || '').toUpperCase().slice(0, 3),
           region: country.region || '',
-          plan_name: `${raw.dataGb === null ? 'Unlimited' : raw.dataGb + 'GB'} / ${raw.validityDays}d`,
-          data_gb: raw.dataGb,
-          plan_type: raw.dataGb === null ? 'unlimited' : 'data',
-          is_regional: country.isRegional || false,
-          validity_days: raw.validityDays,
-          price_eur,
-          price_usd,
-        };
-      })
+          dataGb: raw.dataGb,
+          validityDays: raw.validityDays,
+          price: raw.price,
+          currency: raw.currency,
+          isRegional: country.isRegional || false,
+        })
+      )
     );
 
     console.error(`[Airalo] [${idx}/${total}] ${country.title} — ${plans.length} plans`);
@@ -233,18 +227,6 @@ function extractButtonPlans(page) {
     }
     return plans;
   });
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function addUnique(allPlans, seen, plans) {
-  for (const p of plans) {
-    const key = `${p.provider}|${p.country_code || p.country}|${p.data_gb}|${p.validity_days}|${p.price_eur}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      allPlans.push(p);
-    }
-  }
 }
 
 module.exports = { scrape };
