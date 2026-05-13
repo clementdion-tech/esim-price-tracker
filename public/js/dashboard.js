@@ -285,17 +285,19 @@ function toggleCountry(id) {
 // ---------------------------------------------------------------------------
 
 function buildTable(countryCode, specs, changeIndex) {
-  const providerHeaders = PROVIDERS.map((p) => {
-    const koletClass = p === 'kolet' ? ' th-kolet' : '';
-    return `
-      <th class="th-provider${koletClass}">
-        <div class="th-provider-inner">
-          <span class="prov-dot prov-dot--${p}"></span>
-          ${PROVIDER_LABELS[p]}
-        </div>
-      </th>
-    `;
-  }).join('');
+  // Row 1: provider names spanning 2 columns each
+  const providerHeaders = PROVIDERS.map((p) => `
+    <th colspan="2" class="th-provider${p === 'kolet' ? ' th-kolet' : ''}">
+      <div class="th-provider-inner">
+        <span class="prov-dot prov-dot--${p}"></span>
+        ${PROVIDER_LABELS[p]}
+      </div>
+    </th>`).join('');
+
+  // Row 2: EUR / USD sub-headers for each provider
+  const currencyHeaders = PROVIDERS.map((p) => `
+    <th class="currency-header${p === 'kolet' ? ' th-kolet' : ''}">EUR</th>
+    <th class="currency-header${p === 'kolet' ? ' th-kolet' : ''}">USD</th>`).join('');
 
   const TYPE_BADGES = {
     data:      '<span class="badge-pill badge-data">Data</span>',
@@ -304,11 +306,13 @@ function buildTable(countryCode, specs, changeIndex) {
   };
 
   const rows = specs.map((spec) => {
-    // Find cheapest non-zero price across all providers for this row
-    const prices = PROVIDERS
-      .map((p) => spec.by_provider[p]?.price_eur)
-      .filter((x) => x !== undefined && x !== null && x > 0);
-    const minPrice = prices.length > 1 ? Math.min(...prices) : null;
+    // Find min/max EUR and USD prices across providers that have actual prices
+    const eurPrices = PROVIDERS.map((p) => spec.by_provider[p]?.price_eur).filter((x) => x > 0);
+    const usdPrices = PROVIDERS.map((p) => spec.by_provider[p]?.price_usd).filter((x) => x > 0);
+    const minEur = eurPrices.length ? Math.min(...eurPrices) : null;
+    const maxEur = eurPrices.length ? Math.max(...eurPrices) : null;
+    const minUsd = usdPrices.length ? Math.min(...usdPrices) : null;
+    const maxUsd = usdPrices.length ? Math.max(...usdPrices) : null;
 
     const typeBadge = TYPE_BADGES[spec.plan_type] || '';
 
@@ -317,38 +321,27 @@ function buildTable(countryCode, specs, changeIndex) {
       const isKolet = p === 'kolet';
 
       if (!plan || !plan.price_eur) {
-        return `<td class="gap-cell${isKolet ? ' td-kolet' : ''}">—</td>`;
+        return `<td class="gap-cell${isKolet ? ' kolet-col' : ''}" colspan="2">—</td>`;
       }
 
-      const key    = changeKey(p, countryCode, spec);
-      const change = changeIndex.get(key);
+      const eur = plan.price_eur;
+      const usd = plan.price_usd;
 
-      let cellClass = 'price-cell';
-      if (isKolet) cellClass += ' td-kolet';
+      const eurClass = eurPrices.length > 1
+        ? (eur === minEur ? ' price-best' : eur === maxEur ? ' price-worst' : '')
+        : '';
+      const usdClass = usdPrices.length > 1
+        ? (usd === minUsd ? ' price-best' : usd === maxUsd ? ' price-worst' : '')
+        : '';
 
-      let changeBadge = '';
-      if (change) {
-        cellClass += ' cell-changed';
-        const isDown = change.direction === 'decrease';
-        const sign   = change.change_percent > 0 ? '+' : '';
-        changeBadge  = `<div><span class="price-change-badge price-change-badge--${isDown ? 'down' : 'up'}">${sign}${change.change_percent}%</span></div>`;
-      }
-
-      const isCheapest = minPrice !== null && plan.price_eur === minPrice;
-      if (isCheapest) cellClass += ' cell-cheapest';
-
-      return `
-        <td class="${cellClass}">
-          <div class="price-eur">€${Number(plan.price_eur).toFixed(2)}</div>
-          <div class="price-usd">$${Number(plan.price_usd).toFixed(2)}</div>
-          ${changeBadge}
-        </td>
-      `;
+      const eurTd = `<td class="price-eur-cell${isKolet ? ' kolet-col' : ''}${eurClass}">€${Number(eur).toFixed(2)}</td>`;
+      const usdTd = `<td class="price-usd-cell${isKolet ? ' kolet-col' : ''}${usdClass}">$${Number(usd).toFixed(2)}</td>`;
+      return eurTd + usdTd;
     }).join('');
 
     return `
       <tr>
-        <td>
+        <td class="plan-label-cell">
           <div class="plan-label">
             <span>${esc(spec.label)}</span>
             ${typeBadge}
@@ -363,9 +356,10 @@ function buildTable(countryCode, specs, changeIndex) {
     <table class="comparison-table">
       <thead>
         <tr>
-          <th class="th-plan">Plan</th>
+          <th class="th-plan" rowspan="2">Plan</th>
           ${providerHeaders}
         </tr>
+        <tr>${currencyHeaders}</tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>
@@ -403,7 +397,11 @@ function normalizeDays(days) {
 // ---------------------------------------------------------------------------
 
 function flagEmoji(code) {
-  if (!code || code.length !== 2) return '';
+  if (!code) return '';
+  if (code === '__GLOBE__') return '🌐';
+  if (code === 'EU') return '🇪🇺';
+  if (code === 'AN') return '🌐'; // Netherlands Antilles dissolved — use globe
+  if (code.length !== 2) return '';
   const offset = 127397;
   return [...code.toUpperCase()].map((c) => String.fromCodePoint(c.charCodeAt(0) + offset)).join('');
 }

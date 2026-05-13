@@ -162,18 +162,93 @@ const COUNTRY_ALIASES = {
   'latin america': 'Latin America',
   'latin america and caribbean': 'Latin America',
   'americas': 'Americas',
+  // Fix split rows
+  'palestine, state of': 'Palestine',
+  'guinea bissau': 'Guinea-Bissau',
+  'saint barthelemy': 'Saint Barthélemy',
+  'saint vincent and grenadines': 'Saint Vincent and the Grenadines',
+  'u.s. virgin islands': 'Virgin Islands (U.S.)',
+  'curacao': 'Curaçao',
+  'reunion': 'Réunion',
+  'bonaire, sint eustatius and saba': 'Bonaire',
+  'saint martin (french part)': 'Saint Martin',
+  // Extra common variants
+  'antigua and barbuda': 'Antigua and Barbuda',
+  'trinidad and tobago': 'Trinidad and Tobago',
+  'south georgia': 'South Georgia and the South Sandwich Islands',
+};
+
+// ISO-2 overrides for countries where no provider supplies a 2-letter code
+// Keyed on canonical display name (lowercase)
+const COUNTRY_ISO2 = {
+  // Standard ISO-2 missing from provider raw data
+  'belarus': 'BY',
+  'bhutan': 'BT',
+  'lebanon': 'LB',
+  'vatican city': 'VA',
+  'ethiopia': 'ET',
+  'palestine': 'PS',
+  'virgin islands (u.s.)': 'VI',
+  'bonaire': 'BQ',
+  'réunion': 'RE',
+  'saint barthélemy': 'BL',
+  'saint martin': 'MF',
+  'guinea-bissau': 'GW',
+  'saint vincent and the grenadines': 'VC',
+  'antigua and barbuda': 'AG',
+  'turks and caicos islands': 'TC',
+  'trinidad and tobago': 'TT',
+  'faroe islands': 'FO',
+  'macao': 'MO',
+  'timor-leste': 'TL',
+  'north macedonia': 'MK',
+  'curaçao': 'CW',
+  'sint maarten (dutch part)': 'SX',
+  "côte d'ivoire": 'CI',
+  'democratic republic of the congo': 'CD',
+  'republic of congo': 'CG',
+  // Territories — use parent country flag
+  'azores': 'PT',
+  'madeira': 'PT',
+  'canary islands': 'ES',
+  'marie-galante': 'FR',
+  'scotland': 'GB',
+  'northern cyprus': 'CY',
+  'saba': 'BQ',
+  'sint eustatius': 'BQ',
+  'netherlands antilles': 'AN',
+  // Regional bundles — use EU/globe pseudo-codes handled by flagEmoji()
+  'europe': 'EU',
+  'eastern europe': 'EU',
+  'scandinavia': 'EU',
+  'balkans': 'EU',
+  'middle east and north africa': '__GLOBE__',
+  'asia': '__GLOBE__',
+  'oceania 1': '__GLOBE__',
+  'global': '__GLOBE__',
+  'north america': '__GLOBE__',
+  'latin america': '__GLOBE__',
+  'central america': '__GLOBE__',
+  'caribbean': '__GLOBE__',
+  'caribbean (multi-country)': '__GLOBE__',
+  'africa 1': '__GLOBE__',
+  'africa 2': '__GLOBE__',
+  'southeast asia': '__GLOBE__',
+  'china hong kong macau': 'CN',
+  'japan china': 'JP',
+  'japan south korea': 'JP',
 };
 
 // Holafly city-level slugs to exclude from the comparison matrix
 // (these don't correspond to countries and won't match other providers)
-const CITY_PATTERNS = /^(aaland islands?|åland islands?|abidjan|abu dhabi city|agadir|alaska$|alanya|alberta|alicante|almaty|amman|amsterdam city|antalya city|antalya|alaska cruise|caribbean cruise|europe cruise|mediterranean cruise)$/i;
+const CITY_PATTERNS = /^(aaland islands?|åland islands?|abidjan|abu dhabi city|agadir|alaska|alanya|alberta|alicante|almaty|amman|amsterdam city|antalya city|antalya|alaska cruise|caribbean cruise|europe cruise|mediterranean cruise)$/i;
 
 /**
  * Normalise a country/destination name for grouping.
  * Applies alias mapping then lowercase+trim.
  */
 function normalizeCountryName(name) {
-  const lower = (name || '').toLowerCase().trim().replace(/\s+/g, ' ');
+  const lower = (name || '').toLowerCase().trim().replace(/\t/g, ' ').replace(/\s+/g, ' ');
   const alias = COUNTRY_ALIASES[lower];
   return alias ? alias.toLowerCase() : lower;
 }
@@ -182,8 +257,8 @@ function normalizeCountryName(name) {
  * Returns the canonical display name (title-cased alias or original).
  */
 function canonicalName(name) {
-  const lower = (name || '').toLowerCase().trim().replace(/\s+/g, ' ');
-  return COUNTRY_ALIASES[lower] || name;
+  const lower = (name || '').toLowerCase().trim().replace(/\t/g, ' ').replace(/\s+/g, ' ');
+  return COUNTRY_ALIASES[lower] || name.trim().replace(/\t/g, ' ');
 }
 
 /**
@@ -210,9 +285,11 @@ function roundToStandardGb(gb) {
  * Return the best available ISO-2 country code from a set of plans for the same country.
  * Preference order: 2-letter > first 2 chars of 3-letter > empty.
  */
-function bestCountryCode(plans) {
-  // Only use proper 2-letter ISO codes — truncating 3-letter codes is unreliable
-  // (e.g. Kolet's "FRO" for Faroe Islands → "FR" = France flag)
+function bestCountryCode(plans, canonicalName) {
+  // 1. Try override map first (keyed on canonical display name)
+  const override = COUNTRY_ISO2[(canonicalName || '').toLowerCase()];
+  if (override) return override;
+  // 2. Try proper 2-letter ISO code from any provider's raw data
   for (const p of plans) {
     if (p.country_code && p.country_code.length === 2) return p.country_code.toUpperCase();
   }
@@ -257,7 +334,7 @@ function buildComparisonMatrix(plans) {
 
   // Resolve the best ISO-2 code for each country group
   for (const entry of byCountry.values()) {
-    entry.country_code = bestCountryCode(entry.plans);
+    entry.country_code = bestCountryCode(entry.plans, entry.country);
   }
 
   const matrix = [];

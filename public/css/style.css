@@ -732,8 +732,11 @@ body {
 }
 
 .comparison-table thead th.th-plan { min-width: 160px; text-align: left; }
-.comparison-table thead th.th-provider { text-align: center; min-width: 110px; }
+.comparison-table thead th.th-provider { text-align: center; min-width: 140px; }
 .comparison-table thead th.th-kolet { background: var(--kolet-col-bg); }
+
+/* Plan label cell */
+.plan-label-cell { vertical-align: middle; }
 
 .comparison-table tbody tr { transition: background var(--t); }
 .comparison-table tbody tr:nth-child(odd) td { background: var(--bg-row-alt); }
@@ -787,31 +790,57 @@ body {
 .badge-unlimited-sm{ background: #f0fdf4; color: #15803d; font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; }
 .badge-daily-sm    { background: #faf5ff; color: #7e22ce;  font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; }
 
-/* Price cell */
+/* Price cell (legacy, kept for safety) */
 .price-cell { text-align: center; }
 
-.price-eur {
-  font-weight: 700;
-  font-size: 14px;
+/* Individual EUR / USD cells (new split-column layout) */
+.price-eur-cell,
+.price-usd-cell {
+  text-align: center;
+  padding: 10px 8px;
+  vertical-align: middle;
+  font-size: 13px;
+  min-width: 70px;
+}
+
+.price-eur-cell {
+  font-weight: 600;
   color: var(--text-primary);
-  white-space: nowrap;
+  border-right: 1px solid var(--border-sm);
 }
 
-.price-usd {
-  font-size: 11px;
-  color: var(--text-tertiary);
-  margin-top: 1px;
+.price-usd-cell {
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
-/* Cheapest highlight */
-.cell-cheapest {
-  background: var(--green-bg) !important;
-  outline: 1px solid var(--green-bd);
-  outline-offset: -1px;
-  border-radius: 4px;
+/* Provider sub-header (EUR / USD row) */
+.currency-header {
+  font-size: 10px;
+  font-weight: 600;
+  color: #94a3b8;
+  text-align: center;
+  padding: 4px 8px;
+  background: #f8fafc;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
-.cell-cheapest .price-eur { color: #15803d; }
+/* Price best (cheapest) */
+.price-best {
+  color: #16a34a !important;
+  font-weight: 700;
+}
+
+/* Price worst (most expensive) */
+.price-worst {
+  color: #dc2626 !important;
+}
+
+/* Kolet column tint */
+.kolet-col {
+  background: rgba(99, 102, 241, 0.04) !important;
+}
 
 /* Price changed */
 .cell-changed { background: var(--amber-bg) !important; }
