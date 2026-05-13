@@ -130,12 +130,78 @@ function buildCountrySet(plans) {
   return map;
 }
 
+// Known country name aliases — maps provider-specific names to canonical display name
+const COUNTRY_ALIASES = {
+  'usa': 'United States',
+  'united states of america': 'United States',
+  'arab emirates': 'United Arab Emirates',
+  'uae': 'United Arab Emirates',
+  'uk': 'United Kingdom',
+  'great britain': 'United Kingdom',
+  'macau': 'Macao',
+  'east timor': 'Timor-Leste',
+  'timor - leste': 'Timor-Leste',
+  'democratic republic of congo': 'Democratic Republic of the Congo',
+  'democratic republic of the congo': 'Democratic Republic of the Congo',
+  'drc': 'Democratic Republic of the Congo',
+  'republic of the congo': 'Republic of Congo',
+  'north macedonia': 'North Macedonia',
+  'macedonia': 'North Macedonia',
+  'cote d ivoire': "Côte d'Ivoire",
+  "cote d'ivoire": "Côte d'Ivoire",
+  'ivory coast': "Côte d'Ivoire",
+  'sint maarten': 'Sint Maarten (Dutch Part)',
+  'us virgin islands': 'Virgin Islands (U.S.)',
+  'us vi': 'Virgin Islands (U.S.)',
+  'caribbean cruise': 'Caribbean (Multi-country)',
+  'alaska cruise': 'Alaska Cruise',
+  'europe cruise': 'Europe (Multi-country)',
+  'mediterranean cruise': 'Mediterranean Cruise',
+  'latin america': 'Latin America',
+  'latin america and caribbean': 'Latin America',
+  'americas': 'Americas',
+};
+
+// Holafly city-level slugs to exclude from the comparison matrix
+// (these don't correspond to countries and won't match other providers)
+const CITY_PATTERNS = /^(aaland|abidjan|abu dhabi city|agadir|alaska$|alanya|alberta|alicante|almaty|amman|amsterdam city|antalya city|antalya|alaska cruise|caribbean cruise|europe cruise|mediterranean cruise)$/i;
+
 /**
  * Normalise a country/destination name for grouping.
- * Lowercase + trim + collapse spaces.
+ * Applies alias mapping then lowercase+trim.
  */
 function normalizeCountryName(name) {
-  return (name || '').toLowerCase().trim().replace(/\s+/g, ' ');
+  const lower = (name || '').toLowerCase().trim().replace(/\s+/g, ' ');
+  const alias = COUNTRY_ALIASES[lower];
+  return alias ? alias.toLowerCase() : lower;
+}
+
+/**
+ * Returns the canonical display name (title-cased alias or original).
+ */
+function canonicalName(name) {
+  const lower = (name || '').toLowerCase().trim().replace(/\s+/g, ' ');
+  return COUNTRY_ALIASES[lower] || name;
+}
+
+/**
+ * Returns true if this is a city/cruise entry that should not appear in the
+ * country comparison (Holafly includes city-level destinations).
+ */
+function isCityEntry(name) {
+  return CITY_PATTERNS.test((name || '').trim());
+}
+
+/**
+ * Round a GB value to the nearest standard plan size.
+ * e.g. 4.88 → 5, 0.98 → 1, 9.77 → 10
+ */
+function roundToStandardGb(gb) {
+  if (gb === null || gb === undefined) return null;
+  const standards = [0.5, 1, 1.5, 2, 3, 5, 7, 10, 15, 20, 25, 30, 50, 100];
+  return standards.reduce((prev, curr) =>
+    Math.abs(curr - gb) < Math.abs(prev - gb) ? curr : prev
+  );
 }
 
 /**
@@ -164,22 +230,28 @@ function buildComparisonMatrix(plans) {
   // Group by normalised country name (not country_code — providers use different schemes)
   const byCountry = new Map();
   for (const plan of plans) {
+    // Skip city-level entries — they only exist in Holafly and clutter the comparison
+    if (isCityEntry(plan.country)) continue;
+
+    // Round GB to nearest standard size for display consistency
+    const displayGb = roundToStandardGb(plan.data_gb);
+    const normalizedPlan = { ...plan, data_gb: displayGb };
+
     const key = normalizeCountryName(plan.country);
     if (!key) continue;
     if (!byCountry.has(key)) {
       byCountry.set(key, {
-        country: plan.country,   // keep display name from first occurrence
-        country_code: '',        // filled after grouping
+        country: canonicalName(plan.country),  // use alias display name
+        country_code: '',
         region: plan.region || '',
         plans: [],
       });
     }
     const entry = byCountry.get(key);
-    // Prefer prettier display names (title case, not ALL CAPS)
-    if (plan.country && plan.country.length < entry.country.length) entry.country = plan.country;
-    // Prefer non-empty region
+    // Always use canonical name
+    entry.country = canonicalName(entry.country);
     if (!entry.region && plan.region) entry.region = plan.region;
-    entry.plans.push(plan);
+    entry.plans.push(normalizedPlan);
   }
 
   // Resolve the best ISO-2 code for each country group
@@ -242,7 +314,8 @@ function buildComparisonMatrix(plans) {
 function formatPlanLabel(plan) {
   if (plan.plan_type === 'unlimited') return `Unlimited / ${plan.validity_days}d`;
   if (plan.plan_type === 'daily') return `Daily pass / ${plan.validity_days}d`;
-  const gb = plan.data_gb >= 1 ? `${plan.data_gb}GB` : `${Math.round(plan.data_gb * 1024)}MB`;
+  const rounded = roundToStandardGb(plan.data_gb);
+  const gb = rounded >= 1 ? `${rounded}GB` : `${Math.round(rounded * 1024)}MB`;
   return `${gb} / ${plan.validity_days}d`;
 }
 
