@@ -83,8 +83,10 @@ async function scrape() {
     }
 
     // ── Step 2: scrape each country page ──────────────────────────────────
-    for (let i = 0; i < countries.length; i += CONCURRENCY) {
-      const chunk = countries.slice(i, i + CONCURRENCY);
+    const sampleLimit = process.env.SCRAPE_SAMPLE ? parseInt(process.env.SCRAPE_SAMPLE) : Infinity;
+    const countriesToScrape = countries.slice(0, sampleLimit);
+    for (let i = 0; i < countriesToScrape.length; i += CONCURRENCY) {
+      const chunk = countriesToScrape.slice(i, i + CONCURRENCY);
 
       await Promise.all(
         chunk.map(async (country, j) => {

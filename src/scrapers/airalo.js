@@ -43,9 +43,13 @@ async function scrape() {
       extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
     });
 
+    // Respect SCRAPE_SAMPLE env var (set by test.js --sample=N for fast CI validation)
+    const sampleLimit = process.env.SCRAPE_SAMPLE ? parseInt(process.env.SCRAPE_SAMPLE) : Infinity;
+    const countriesToScrape = countries.slice(0, sampleLimit);
+
     // Process in chunks of CONCURRENCY (4 parallel pages)
-    for (let i = 0; i < countries.length; i += CONCURRENCY) {
-      const chunk = countries.slice(i, i + CONCURRENCY);
+    for (let i = 0; i < countriesToScrape.length; i += CONCURRENCY) {
+      const chunk = countriesToScrape.slice(i, i + CONCURRENCY);
 
       const chunkResults = await Promise.all(
         chunk.map(async (c, j) => {

@@ -37,6 +37,10 @@ const onlyArg = process.argv.find((a) => a.startsWith('--only='));
 const only = onlyArg ? onlyArg.replace('--only=', '').split(',').map((s) => s.trim()) : null;
 const scraperNames = only || Object.keys(SCRAPERS);
 
+// --sample=N limits Playwright scrapers to N countries (for fast CI validation)
+const sampleArg = process.argv.find((a) => a.startsWith('--sample='));
+if (sampleArg) process.env.SCRAPE_SAMPLE = sampleArg.replace('--sample=', '');
+
 // ─── Validation helpers ───────────────────────────────────────────────────────
 
 /**

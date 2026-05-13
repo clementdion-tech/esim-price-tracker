@@ -39,9 +39,9 @@ jobs:
       - name: QA — validate scrapers before full run
         run: |
           if [ -n "${{ github.event.inputs.providers }}" ]; then
-            node src/test.js --only=${{ github.event.inputs.providers }}
+            node src/test.js --only=${{ github.event.inputs.providers }} --sample=5
           else
-            node src/test.js
+            node src/test.js --sample=5
           fi
 
       - name: Run scrapers

@@ -89,8 +89,10 @@ async function scrape() {
     }
 
     // ── Step 2: scrape each country page in parallel ──────────────────────
-    for (let i = 0; i < countryLinks.length; i += CONCURRENCY) {
-      const chunk = countryLinks.slice(i, i + CONCURRENCY);
+    const sampleLimit = process.env.SCRAPE_SAMPLE ? parseInt(process.env.SCRAPE_SAMPLE) : Infinity;
+    const linksToScrape = countryLinks.slice(0, sampleLimit);
+    for (let i = 0; i < linksToScrape.length; i += CONCURRENCY) {
+      const chunk = linksToScrape.slice(i, i + CONCURRENCY);
 
       await Promise.all(
         chunk.map(async (href, j) => {
