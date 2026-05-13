@@ -122,10 +122,8 @@ async function scrape() {
           }
 
           const slug = path.replace(/^\/esim-/, '').replace(/\/$/, '');
-          if (
-            slug.includes('/') ||
-            /^(europe|asia|oceania|africa|americas|north-america|latin-america|caribbean|middle-east|global)/.test(slug)
-          ) continue;
+          // Only skip sub-pages (e.g. europe/special) — keep regional slugs like europe, asia
+          if (slug.includes('/')) continue;
 
           const countryName = slug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
           // Always use the explicit /en/ locale URL to avoid locale redirect contamination

@@ -18,10 +18,13 @@ const SHOP_URL = 'https://esim.holafly.com/shop/all-destinations/';
 const BASE_URL = 'https://esim.holafly.com';
 const CONCURRENCY = 3;
 
-// Slugs that are not individual countries (regional/utility pages)
+// Non-plan pages to exclude (utility/nav pages, not actual eSIM destinations)
 const EXCLUDED_SLUGS = new Set([
-  'esim-rewards-loyalty-program', 'esim-asia', 'esim-europe', 'esim-africa',
-  'esim-americas', 'esim-oceania', 'esim-middle-east', 'esim-caribbean',
+  'esim-rewards-loyalty-program',
+  'esim-installation-and-activation-instructions',
+  'esim-how-to-install',
+  'esim-compatible-devices',
+  'esim-faq',
 ]);
 
 async function scrape() {

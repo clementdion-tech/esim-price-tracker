@@ -16,15 +16,17 @@ const { toEurUsd } = require('../currency');
 
 const BASE_URL = 'https://www.airalo.com';
 const COUNTRIES_API = 'https://www.airalo.com/api/v4/countries';
+const REGIONS_API = 'https://www.airalo.com/api/v4/regions';
 const CONCURRENCY = 4;
 
 // ─── Main export ─────────────────────────────────────────────────────────────
 
 async function scrape() {
-  // Step 1: fetch country list (plain HTTP — fast, no browser)
-  console.error('[Airalo] Fetching country list from API...');
-  const countries = await fetchCountryList();
-  console.error(`[Airalo] ${countries.length} countries to scrape`);
+  // Step 1: fetch countries + regions (plain HTTP — fast, no browser)
+  console.error('[Airalo] Fetching country + region list from API...');
+  const [countries, regions] = await Promise.all([fetchCountryList(), fetchRegionList()]);
+  const allDestinations = [...countries, ...regions];
+  console.error(`[Airalo] ${countries.length} countries + ${regions.length} regions = ${allDestinations.length} total`);
 
   const browser = await chromium.launch({
     headless: true,
@@ -45,7 +47,7 @@ async function scrape() {
 
     // Respect SCRAPE_SAMPLE env var (set by test.js --sample=N for fast CI validation)
     const sampleLimit = process.env.SCRAPE_SAMPLE ? parseInt(process.env.SCRAPE_SAMPLE) : Infinity;
-    const countriesToScrape = countries.slice(0, sampleLimit);
+    const countriesToScrape = allDestinations.slice(0, sampleLimit);
 
     // Process in chunks of CONCURRENCY (4 parallel pages)
     for (let i = 0; i < countriesToScrape.length; i += CONCURRENCY) {
@@ -80,20 +82,29 @@ async function scrape() {
 async function fetchCountryList() {
   try {
     const { data } = await axios.get(COUNTRIES_API, {
-      headers: {
-        Accept: 'application/json',
-        'User-Agent': 'Mozilla/5.0 (compatible; esim-price-tracker/1.0)',
-      },
+      headers: { Accept: 'application/json', 'User-Agent': 'Mozilla/5.0 (compatible; esim-price-tracker/1.0)' },
       timeout: 30000,
     });
-
-    // API returns { data: [ {id, slug, title}, ... ] } or a bare array
     const list = Array.isArray(data) ? data : (data?.data ?? []);
     return list.filter((c) => c.slug && c.title);
   } catch (err) {
     console.error(`[Airalo] Country API error: ${err.message}`);
-    // Minimal fallback so we still get some data
-    return [{ slug: 'france', title: 'France', id: 'fr' }];
+    return [{ slug: 'france', title: 'France' }];
+  }
+}
+
+async function fetchRegionList() {
+  try {
+    const { data } = await axios.get(REGIONS_API, {
+      headers: { Accept: 'application/json', 'User-Agent': 'Mozilla/5.0 (compatible; esim-price-tracker/1.0)' },
+      timeout: 30000,
+    });
+    const list = Array.isArray(data) ? data : (data?.data ?? []);
+    // Tag as regional so the dashboard can distinguish them
+    return list.filter((r) => r.slug && r.title).map((r) => ({ ...r, isRegional: true }));
+  } catch (err) {
+    console.error(`[Airalo] Region API error: ${err.message}`);
+    return [];
   }
 }
 
@@ -124,6 +135,7 @@ async function scrapeCountryPage(page, country, idx, total) {
           plan_name: `${raw.dataGb === null ? 'Unlimited' : raw.dataGb + 'GB'} / ${raw.validityDays}d`,
           data_gb: raw.dataGb,
           plan_type: raw.dataGb === null ? 'unlimited' : 'data',
+          is_regional: country.isRegional || false,
           validity_days: raw.validityDays,
           price_eur,
           price_usd,
@@ -175,14 +187,15 @@ async function extractPackagesFromPage(page, countryName, countrySlug) {
     ];
 
     for (const btn of buttons) {
-      // Button text looks like "1GB£3.50" or "3 GB $5.50" or "10GB€11.50"
+      // Button text: "1GB£3.50", "3 GB $5.50", "10GB€11.50", or "Unlimited$X.XX"
       const text = btn.textContent.trim();
       const gbMatch = text.match(/(\d+(?:\.\d+)?)\s*GB/i);
+      const isUnlimited = /unlimited/i.test(text);
       const priceMatch = text.match(/([£$€])\s*(\d+(?:\.\d+)?)/);
 
-      if (!gbMatch || !priceMatch) continue;
+      if ((!gbMatch && !isUnlimited) || !priceMatch) continue;
 
-      const dataGb = parseFloat(gbMatch[1]);
+      const dataGb = isUnlimited ? null : parseFloat(gbMatch[1]);
       const price = parseFloat(priceMatch[2]);
       const sym = priceMatch[1];
       const currency = sym === '£' ? 'GBP' : sym === '$' ? 'USD' : 'EUR';
