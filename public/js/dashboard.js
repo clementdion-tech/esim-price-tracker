@@ -186,6 +186,8 @@ function setTypeFilter(btn) {
 function resetFilters() {
   document.getElementById('filter-country').value = '';
   document.getElementById('filter-region').value = '';
+  document.getElementById('filter-days').value = '';
+  document.getElementById('filter-gb').value = '';
   document.getElementById('filter-gaps').checked = false;
   activeTypeFilter = '';
   document.querySelectorAll('#type-seg .seg-btn').forEach((b, i) => b.classList.toggle('active', i === 0));
@@ -202,6 +204,8 @@ function renderMatrix() {
   const countryFilter = document.getElementById('filter-country').value.toLowerCase().trim();
   const regionFilter  = document.getElementById('filter-region').value.toLowerCase();
   const gapsOnly      = document.getElementById('filter-gaps').checked;
+  const daysFilter    = document.getElementById('filter-days').value;   // e.g. "7", "30", ""
+  const gbFilter      = document.getElementById('filter-gb').value;     // e.g. "5", "unlimited", ""
 
   let matrix = globalData.matrix || [];
 
@@ -220,6 +224,18 @@ function renderMatrix() {
   for (const row of matrix) {
     let specs = row.specs;
     if (activeTypeFilter) specs = specs.filter((s) => s.plan_type === activeTypeFilter);
+    if (daysFilter) {
+      const d = parseInt(daysFilter);
+      specs = specs.filter((s) => parseInt(s.validity_days) === d);
+    }
+    if (gbFilter) {
+      if (gbFilter === 'unlimited') {
+        specs = specs.filter((s) => s.data_gb === null);
+      } else {
+        const gb = parseFloat(gbFilter);
+        specs = specs.filter((s) => s.data_gb !== null && Math.abs(s.data_gb - gb) < 0.1);
+      }
+    }
     if (gapsOnly) specs = specs.filter((s) => s.gap_count > 0);
     if (specs.length === 0) continue;
 
