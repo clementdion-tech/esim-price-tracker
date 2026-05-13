@@ -1,15 +1,12 @@
 /**
  * Holafly scraper (esim.holafly.com)
- * Holafly specialises in unlimited daily data plans.
- * Plans are priced by country + duration (e.g. 7 days, 30 days).
+ * Holafly sells unlimited data plans. They use a Nuxt.js / Vue frontend.
+ * Strategy: capture XHR + extract __NUXT__ / window state + DOM fallback.
  */
 const { chromium } = require('playwright');
 const { toEurUsd } = require('../currency');
 
 const BASE_URL = 'https://esim.holafly.com';
-
-// Holafly uses path segments per language; /fr/ is French — we navigate the English root
-const START_PATHS = ['/', '/en/', '/esim/', '/store/'];
 
 async function scrape() {
   const browser = await chromium.launch({
@@ -29,88 +26,101 @@ async function scrape() {
     });
 
     const page = await context.newPage();
-    const apiResponses = [];
+    const capturedJson = [];
 
-    page.on('response', async (response) => {
-      const url = response.url();
-      const ct = response.headers()['content-type'] || '';
-      if (response.status() === 200 && ct.includes('json')) {
+    page.on('response', async (res) => {
+      const ct = res.headers()['content-type'] || '';
+      if (res.status() === 200 && ct.includes('json')) {
         try {
-          const text = await response.text();
-          if (
-            text.length > 200 &&
-            (text.includes('"price"') || text.includes('"amount"') || text.includes('"cost"')) &&
-            (text.includes('"country"') || text.includes('"destination"') || text.includes('"duration"'))
-          ) {
-            apiResponses.push({ url, text });
+          const text = await res.text();
+          if (text.length > 300) {
+            console.error(`[Holafly] XHR: ${res.url().substring(0, 100)} (${text.length}b)`);
+            capturedJson.push({ url: res.url(), text });
           }
         } catch (_) {}
       }
     });
 
-    for (const path of START_PATHS) {
+    // Try English and French entry points
+    for (const path of ['/', '/en/', '/en/esim/', '/fr/', '/esim/']) {
       try {
-        console.error(`[Holafly] Trying ${BASE_URL}${path}...`);
-        await page.goto(`${BASE_URL}${path}`, { waitUntil: 'networkidle', timeout: 60000 });
-        await page.waitForTimeout(2000);
+        console.error(`[Holafly] Trying ${BASE_URL}${path}`);
+        await page.goto(`${BASE_URL}${path}`, { waitUntil: 'networkidle', timeout: 45000 });
+        await page.waitForTimeout(2500);
         await autoScroll(page);
         await page.waitForTimeout(1500);
-        if (apiResponses.length > 0) break;
-      } catch (_) {}
-    }
 
-    console.error(`[Holafly] Captured ${apiResponses.length} API responses`);
-
-    for (const { url, text } of apiResponses) {
-      try {
-        const json = JSON.parse(text);
-        const plans = parseHolaflyResponse(json);
-        for (const p of plans) {
-          const key = `${p.country_code}|${p.plan_type}|${p.validity_days}|${p.price_eur}`;
-          if (!seen.has(key)) { seen.add(key); allPlans.push(p); }
+        // Try multiple window state patterns
+        const windowState = await page.evaluate(() => {
+          try { return window.__NUXT__ || null; } catch (_) { return null; }
+        });
+        if (windowState) {
+          const plans = deepSearchPlans(windowState, 'holafly');
+          console.error(`[Holafly] __NUXT__ plans: ${plans.length}`);
+          addUnique(allPlans, seen, plans);
         }
-        if (plans.length > 0) {
-          console.error(`[Holafly] Extracted ${plans.length} plans from ${url}`);
+
+        // Next.js fallback
+        const nd = await extractNextData(page);
+        if (nd) {
+          const plans = deepSearchPlans(nd, 'holafly');
+          console.error(`[Holafly] __NEXT_DATA__ plans: ${plans.length}`);
+          addUnique(allPlans, seen, plans);
         }
-      } catch (_) {}
-    }
 
-    // If API interception didn't yield results, scrape country pages from the DOM
-    if (allPlans.length < 10) {
-      console.error('[Holafly] Falling back to DOM country listing...');
-      const countryLinks = await page.$$eval(
-        'a[href*="esim"], a[href*="country"], a[href*="destination"]',
-        (els) =>
-          [...new Set(els.map((el) => el.href))]
-            .filter((h) => h.startsWith('http') && !h.includes('#'))
-            .slice(0, 150)
-      );
+        // XHR responses
+        for (const { url, text } of capturedJson) {
+          try {
+            const plans = deepSearchPlans(JSON.parse(text), 'holafly');
+            if (plans.length > 0) console.error(`[Holafly] ${plans.length} from XHR ${url.substring(0, 80)}`);
+            addUnique(allPlans, seen, plans);
+          } catch (_) {}
+        }
 
-      for (const href of countryLinks) {
-        apiResponses.length = 0;
-        try {
-          await page.goto(href, { waitUntil: 'networkidle', timeout: 30000 });
-          await page.waitForTimeout(1200);
-
-          // Try to extract pricing from the DOM (Holafly typically lists duration + price in cards)
-          const domPlans = await extractHolaflyDom(page, href);
-          for (const p of domPlans) {
-            const key = `${p.country_code}|${p.plan_type}|${p.validity_days}|${p.price_eur}`;
-            if (!seen.has(key)) { seen.add(key); allPlans.push(p); }
-          }
-
-          for (const { text } of apiResponses) {
-            try {
-              const json = JSON.parse(text);
-              const plans = parseHolaflyResponse(json);
-              for (const p of plans) {
-                const key = `${p.country_code}|${p.plan_type}|${p.validity_days}|${p.price_eur}`;
-                if (!seen.has(key)) { seen.add(key); allPlans.push(p); }
-              }
-            } catch (_) {}
-          }
-        } catch (_) {}
+        if (allPlans.length > 0) break;
+      } catch (err) {
+        console.error(`[Holafly] ${path} error: ${err.message}`);
       }
+    }
+
+    // Get country links and visit individually
+    const countryLinks = await page.$$eval(
+      'a[href*="esim"], a[href*="country"], a[href*="destino"], a[href*="destination"]',
+      (els, base) =>
+        [...new Set(
+          els
+            .map((el) => el.href)
+            .filter((h) => h.startsWith(base) && h !== base && !h.includes('#'))
+        )].slice(0, 200),
+      BASE_URL
+    );
+    console.error(`[Holafly] ${countryLinks.length} country links`);
+
+    for (const href of countryLinks) {
+      capturedJson.length = 0;
+      try {
+        await page.goto(href, { waitUntil: 'networkidle', timeout: 35000 });
+        await page.waitForTimeout(1500);
+
+        // Window state
+        const ws = await page.evaluate(() => {
+          try { return window.__NUXT__ || null; } catch (_) { return null; }
+        });
+        if (ws) addUnique(allPlans, seen, deepSearchPlans(ws, 'holafly'));
+
+        const nd = await extractNextData(page);
+        if (nd) addUnique(allPlans, seen, deepSearchPlans(nd, 'holafly'));
+
+        // XHR
+        for (const { text } of capturedJson) {
+          try { addUnique(allPlans, seen, deepSearchPlans(JSON.parse(text), 'holafly')); } catch (_) {}
+        }
+
+        // DOM fallback: Holafly shows duration + price as cards
+        const domPlans = await extractHolaflyDom(page, href);
+        addUnique(allPlans, seen, domPlans);
+
+      } catch (_) {}
     }
   } finally {
     await browser.close();
@@ -120,132 +130,44 @@ async function scrape() {
   return allPlans;
 }
 
-function parseHolaflyResponse(data) {
-  const plans = [];
-  const items = findArray(data);
-  if (!items) return plans;
-
-  for (const item of items) {
-    try {
-      const plan = normalizeHolafly(item);
-      if (plan) plans.push(plan);
-    } catch (_) {}
-  }
-  return plans;
-}
-
-function findArray(data) {
-  if (Array.isArray(data) && data.length && hasPrice(data[0])) return data;
-  if (data && typeof data === 'object') {
-    for (const key of ['data', 'packages', 'plans', 'products', 'esims', 'destinations', 'items', 'results']) {
-      if (Array.isArray(data[key]) && data[key].length && hasPrice(data[key][0])) {
-        return data[key];
-      }
-    }
-    for (const v of Object.values(data)) {
-      if (v && typeof v === 'object') {
-        const nested = findArray(v);
-        if (nested) return nested;
-      }
-    }
-  }
-  return null;
-}
-
-function hasPrice(obj) {
-  if (!obj || typeof obj !== 'object') return false;
-  return Object.keys(obj).some((k) => ['price', 'amount', 'cost'].includes(k.toLowerCase()));
-}
-
-async function normalizeHolafly(item) {
-  const country = item.country || item.country_name || item.destination || item.location || '';
-  const countryCode = item.country_code || item.iso || item.code || '';
-  const region = item.region || item.continent || '';
-  const dataStr = String(item.data || item.data_amount || '');
-  const dataGb = parseDataGb(dataStr);
-  const validityDays = parseInt(item.duration || item.days || item.validity || item.day || '0') || null;
-  const priceRaw = parseFloat(item.price || item.amount || item.cost || '0');
-  const currency = (item.currency || 'EUR').toUpperCase(); // Holafly primary currency is EUR
-
-  const isUnlimited =
-    item.is_unlimited ||
-    item.unlimited ||
-    String(item.data || '').toLowerCase().includes('unlimited') ||
-    dataGb === null;
-
-  // Detect daily pass type
-  const planType = item.is_daily || item.type === 'daily' ? 'daily' : isUnlimited ? 'unlimited' : 'data';
-
-  if (!country || priceRaw <= 0) return null;
-
-  const { price_eur, price_usd } = await toEurUsd(priceRaw, currency);
-  const planName =
-    item.title ||
-    item.name ||
-    (planType === 'unlimited' ? `Unlimited / ${validityDays}d` : `${dataGb}GB / ${validityDays}d`);
-
-  return {
-    provider: 'holafly',
-    country,
-    country_code: countryCode.toUpperCase(),
-    region,
-    plan_name: planName,
-    data_gb: isUnlimited ? null : dataGb,
-    plan_type: planType,
-    validity_days: validityDays,
-    price_eur,
-    price_usd,
-  };
+async function extractNextData(page) {
+  try {
+    const raw = await page.$eval('#__NEXT_DATA__', (el) => el.textContent);
+    return JSON.parse(raw);
+  } catch (_) { return null; }
 }
 
 async function extractHolaflyDom(page, href) {
-  // Extract country name from URL and structured pricing from DOM
   const plans = [];
   try {
-    const countrySlug = href.split('/').filter(Boolean).pop()?.replace(/-esim.*$/, '') || '';
+    const countrySlug = href.replace(/\/$/, '').split('/').pop() || '';
+    const countryName = countrySlug.replace(/-esim.*$/, '').replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
-    const data = await page.evaluate(() => {
+    const cards = await page.evaluate(() => {
       const results = [];
-      // Holafly typically renders plan cards with duration and price
-      const cards = document.querySelectorAll(
-        '[class*="plan"], [class*="card"], [class*="option"], [class*="package"], [class*="duration"]'
-      );
-      cards.forEach((card) => {
-        const text = card.textContent || '';
-        const priceMatch = text.match(/€\s*(\d+(?:[.,]\d+)?)/);
-        const daysMatch = text.match(/(\d+)\s*(?:day|jour|día|giorni)/i);
-        if (priceMatch && daysMatch) {
-          results.push({
-            price: parseFloat(priceMatch[1].replace(',', '.')),
-            days: parseInt(daysMatch[1]),
-            text: text.trim().substring(0, 100),
-          });
-        }
-      });
-      // Also try JSON-LD structured data
-      const jsonLd = document.querySelector('script[type="application/ld+json"]');
-      if (jsonLd) {
-        try {
-          results.push({ jsonLd: JSON.parse(jsonLd.textContent) });
-        } catch (_) {}
+      // Holafly renders plan options with duration + price
+      const allText = document.body.innerText;
+      // Look for "X days" next to a price pattern
+      const regex = /(\d+)\s*(?:day|jour|día|giorni|Tag)s?[^\n€$]*[€$]\s*(\d+(?:[.,]\d+)?)/gi;
+      let m;
+      while ((m = regex.exec(allText)) !== null) {
+        results.push({ days: parseInt(m[1]), price: parseFloat(m[2].replace(',', '.')) });
       }
       return results;
     });
 
-    const countryName = countrySlug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-
-    for (const item of data) {
-      if (item.price && item.days) {
-        const { price_eur, price_usd } = await toEurUsd(item.price, 'EUR');
+    for (const { days, price } of cards) {
+      if (days > 0 && price > 0) {
+        const { price_eur, price_usd } = await toEurUsd(price, 'EUR');
         plans.push({
           provider: 'holafly',
           country: countryName,
           country_code: '',
           region: '',
-          plan_name: `Unlimited / ${item.days}d`,
+          plan_name: `Unlimited / ${days}d`,
           data_gb: null,
           plan_type: 'unlimited',
-          validity_days: item.days,
+          validity_days: days,
           price_eur,
           price_usd,
         });
@@ -253,6 +175,63 @@ async function extractHolaflyDom(page, href) {
     }
   } catch (_) {}
   return plans;
+}
+
+function deepSearchPlans(obj, provider, depth = 0, results = []) {
+  if (depth > 20 || !obj) return results;
+
+  if (Array.isArray(obj) && obj.length > 0 && obj.length < 2000) {
+    const sample = obj[0];
+    if (sample && typeof sample === 'object' && looksLikePlan(sample)) {
+      const plans = obj.map((item) => normalizePlan(item, provider)).filter(Boolean);
+      if (plans.length > 0) results.push(...plans);
+      return results;
+    }
+  }
+
+  if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+    for (const v of Object.values(obj)) {
+      deepSearchPlans(v, provider, depth + 1, results);
+    }
+  }
+  return results;
+}
+
+function looksLikePlan(obj) {
+  const keys = Object.keys(obj).map((k) => k.toLowerCase());
+  const hasPrice = keys.some((k) => ['price', 'amount', 'cost'].some((pk) => k.includes(pk)));
+  const hasDuration = keys.some((k) => ['day', 'days', 'validity', 'duration'].some((dk) => k.includes(dk)));
+  return hasPrice && hasDuration;
+}
+
+async function normalizePlan(item, provider) {
+  const country = item.country || item.country_name || item.destination || item.location || '';
+  const countryCode = (item.country_code || item.iso || item.code || '').toUpperCase();
+  const region = item.region || item.continent || '';
+  const dataStr = String(item.data || item.data_amount || '');
+  const dataGb = parseDataGb(dataStr);
+  const isUnlimited = dataGb === null || item.unlimited || item.is_unlimited ||
+    String(item.data || '').toLowerCase().includes('unlimited');
+  const validityDays = parseInt(item.duration || item.days || item.validity || item.day || '0') || null;
+  const priceRaw = parseFloat(item.price || item.amount || item.cost || '0');
+  const currency = (item.currency || 'EUR').toUpperCase();
+
+  if (!country || priceRaw <= 0) return null;
+
+  const { price_eur, price_usd } = await toEurUsd(priceRaw, currency);
+
+  return {
+    provider,
+    country,
+    country_code: countryCode,
+    region,
+    plan_name: item.title || item.name || (isUnlimited ? `Unlimited / ${validityDays}d` : `${dataGb}GB / ${validityDays}d`),
+    data_gb: isUnlimited ? null : dataGb,
+    plan_type: isUnlimited ? 'unlimited' : 'data',
+    validity_days: validityDays,
+    price_eur,
+    price_usd,
+  };
 }
 
 function parseDataGb(str) {
@@ -264,7 +243,6 @@ function parseDataGb(str) {
   const n = parseFloat(m[1]);
   const unit = m[2].toLowerCase();
   if (unit === 'mb') return Math.round((n / 1024) * 100) / 100;
-  if (unit === 'tb') return n * 1024;
   return n;
 }
 
@@ -275,13 +253,17 @@ async function autoScroll(page) {
       const timer = setInterval(() => {
         window.scrollBy(0, 400);
         total += 400;
-        if (total >= document.body.scrollHeight - window.innerHeight) {
-          clearInterval(timer);
-          resolve();
-        }
-      }, 150);
+        if (total >= document.body.scrollHeight - window.innerHeight) { clearInterval(timer); resolve(); }
+      }, 200);
     });
   });
+}
+
+function addUnique(allPlans, seen, plans) {
+  for (const p of plans) {
+    const key = `${p.provider}|${p.country_code || p.country}|${p.data_gb}|${p.validity_days}|${p.price_eur}`;
+    if (!seen.has(key)) { seen.add(key); allPlans.push(p); }
+  }
 }
 
 module.exports = { scrape };

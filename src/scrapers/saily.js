@@ -1,7 +1,6 @@
 /**
  * Saily scraper (saily.com)
- * Saily is a Nordic eSIM provider. They list packages per country.
- * Their React frontend fetches from an internal API.
+ * Uses __NEXT_DATA__ extraction + XHR capture.
  */
 const { chromium } = require('playwright');
 const { toEurUsd } = require('../currency');
@@ -26,83 +25,78 @@ async function scrape() {
     });
 
     const page = await context.newPage();
-    const apiResponses = [];
+    const capturedJson = [];
 
-    page.on('response', async (response) => {
-      const url = response.url();
-      const ct = response.headers()['content-type'] || '';
-      if (response.status() === 200 && ct.includes('json')) {
+    page.on('response', async (res) => {
+      const ct = res.headers()['content-type'] || '';
+      if (res.status() === 200 && ct.includes('json')) {
         try {
-          const text = await response.text();
-          if (
-            text.length > 200 &&
-            (text.includes('"price"') || text.includes('"amount"')) &&
-            (text.includes('"country"') || text.includes('"destination"') || text.includes('"packages"'))
-          ) {
-            apiResponses.push({ url, text });
+          const text = await res.text();
+          if (text.length > 500) {
+            console.error(`[Saily] XHR: ${res.url().substring(0, 100)} (${text.length}b)`);
+            capturedJson.push({ url: res.url(), text });
           }
         } catch (_) {}
       }
     });
 
-    console.error('[Saily] Loading homepage...');
-    await page.goto(BASE_URL, { waitUntil: 'networkidle', timeout: 60000 });
-    await page.waitForTimeout(2000);
-
-    // Try dedicated packages/store page
-    for (const path of ['/store', '/packages', '/esim', '/destinations', '/plans']) {
+    // Load main store / destinations page
+    for (const path of ['/', '/store', '/esim', '/destinations']) {
       try {
-        await page.goto(`${BASE_URL}${path}`, { waitUntil: 'networkidle', timeout: 30000 });
-        await page.waitForTimeout(1500);
-        if (apiResponses.length > 0) break;
+        console.error(`[Saily] Trying ${BASE_URL}${path}...`);
+        await page.goto(`${BASE_URL}${path}`, { waitUntil: 'networkidle', timeout: 45000 });
+        await page.waitForTimeout(2000);
+
+        const nd = await extractNextData(page);
+        if (nd) {
+          const plans = deepSearchPlans(nd, 'saily');
+          console.error(`[Saily] __NEXT_DATA__ from ${path}: ${plans.length} plans`);
+          addUnique(allPlans, seen, plans);
+        }
+
+        for (const { text } of capturedJson) {
+          try {
+            const plans = deepSearchPlans(JSON.parse(text), 'saily');
+            addUnique(allPlans, seen, plans);
+          } catch (_) {}
+        }
+
+        if (allPlans.length > 0) break;
       } catch (_) {}
     }
 
-    // Scroll to trigger lazy loading
-    await autoScroll(page);
-    await page.waitForTimeout(2000);
+    // Collect country links and visit each
+    const countryLinks = await page.$$eval(
+      'a[href*="esim"], a[href*="country"], a[href*="destination"], a[href*="/store/"]',
+      (els, base) =>
+        [...new Set(
+          els
+            .map((el) => el.href)
+            .filter((h) => h.startsWith(base) && h !== base && h !== base + '/')
+        )].slice(0, 200),
+      BASE_URL
+    );
+    console.error(`[Saily] ${countryLinks.length} country links found`);
 
-    console.error(`[Saily] Captured ${apiResponses.length} API responses`);
-
-    for (const { url, text } of apiResponses) {
+    for (const href of countryLinks) {
+      capturedJson.length = 0;
       try {
-        const json = JSON.parse(text);
-        const plans = parseSailyResponse(json);
-        for (const p of plans) {
-          const key = `${p.country_code}|${p.data_gb}|${p.validity_days}|${p.price_eur}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            allPlans.push(p);
-          }
+        await page.goto(href, { waitUntil: 'networkidle', timeout: 35000 });
+        await page.waitForTimeout(1200);
+
+        const nd = await extractNextData(page);
+        if (nd) {
+          const plans = deepSearchPlans(nd, 'saily');
+          if (plans.length > 0) console.error(`[Saily] ${plans.length} from ${href.split('/').pop()}`);
+          addUnique(allPlans, seen, plans);
+        }
+
+        for (const { text } of capturedJson) {
+          try {
+            addUnique(allPlans, seen, deepSearchPlans(JSON.parse(text), 'saily'));
+          } catch (_) {}
         }
       } catch (_) {}
-    }
-
-    // If not enough data, try getting country list from DOM and visiting each
-    if (allPlans.length < 20) {
-      console.error('[Saily] Trying country-by-country scrape...');
-      const countryLinks = await page.$$eval(
-        'a[href*="country"], a[href*="destination"], a[href*="esim"]',
-        (els) => [...new Set(els.map((el) => el.href))].filter((h) => h.startsWith('http')).slice(0, 100)
-      );
-
-      for (const href of countryLinks) {
-        apiResponses.length = 0;
-        try {
-          await page.goto(href, { waitUntil: 'networkidle', timeout: 30000 });
-          await page.waitForTimeout(1200);
-          for (const { text } of apiResponses) {
-            try {
-              const json = JSON.parse(text);
-              const plans = parseSailyResponse(json);
-              for (const p of plans) {
-                const key = `${p.country_code}|${p.data_gb}|${p.validity_days}|${p.price_eur}`;
-                if (!seen.has(key)) { seen.add(key); allPlans.push(p); }
-              }
-            } catch (_) {}
-          }
-        } catch (_) {}
-      }
     }
   } finally {
     await browser.close();
@@ -112,64 +106,75 @@ async function scrape() {
   return allPlans;
 }
 
-function parseSailyResponse(data) {
-  const plans = [];
-  const items = findArray(data);
-  if (!items) return plans;
-
-  for (const item of items) {
+async function extractNextData(page) {
+  try {
+    const raw = await page.$eval('#__NEXT_DATA__', (el) => el.textContent);
+    return JSON.parse(raw);
+  } catch (_) {
+    // Try Nuxt / generic window state
     try {
-      const plan = normalizeSaily(item);
-      if (plan) plans.push(plan);
-    } catch (_) {}
-  }
-  return plans;
-}
-
-function findArray(data) {
-  if (Array.isArray(data) && data.length && hasPriceKey(data[0])) return data;
-  if (data && typeof data === 'object') {
-    for (const key of ['data', 'packages', 'plans', 'products', 'destinations', 'items', 'results']) {
-      if (Array.isArray(data[key]) && data[key].length && hasPriceKey(data[key][0])) {
-        return data[key];
-      }
-    }
-    for (const v of Object.values(data)) {
-      if (v && typeof v === 'object') {
-        const nested = findArray(v);
-        if (nested) return nested;
-      }
+      return await page.evaluate(() => window.__NUXT__ || window.__INITIAL_STATE__ || null);
+    } catch (_) {
+      return null;
     }
   }
-  return null;
 }
 
-function hasPriceKey(obj) {
-  if (!obj || typeof obj !== 'object') return false;
-  return Object.keys(obj).some((k) => ['price', 'amount', 'cost', 'net_price'].includes(k.toLowerCase()));
+function deepSearchPlans(obj, provider, depth = 0, results = []) {
+  if (depth > 20 || !obj) return results;
+
+  if (Array.isArray(obj) && obj.length > 0 && obj.length < 2000) {
+    const sample = obj[0];
+    if (sample && typeof sample === 'object' && looksLikePlan(sample)) {
+      const plans = obj.map((item) => normalizePlan(item, provider)).filter(Boolean);
+      if (plans.length > 0) results.push(...plans);
+      return results;
+    }
+  }
+
+  if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+    for (const v of Object.values(obj)) {
+      deepSearchPlans(v, provider, depth + 1, results);
+    }
+  }
+
+  return results;
 }
 
-async function normalizeSaily(item) {
+function looksLikePlan(obj) {
+  const keys = Object.keys(obj).map((k) => k.toLowerCase());
+  const hasPrice = keys.some((k) =>
+    ['price', 'net_price', 'amount', 'cost', 'retail_price'].some((pk) => k.includes(pk))
+  );
+  const hasDuration = keys.some((k) =>
+    ['day', 'days', 'validity', 'duration'].some((dk) => k.includes(dk))
+  );
+  const hasData = keys.some((k) =>
+    ['data', 'gb', 'allowance', 'size', 'bandwidth'].some((dk) => k.includes(dk))
+  );
+  return hasPrice && (hasDuration || hasData);
+}
+
+async function normalizePlan(item, provider) {
   const country = item.country || item.country_name || item.destination || item.name || '';
-  const countryCode = item.country_code || item.iso_code || item.code || '';
+  const countryCode = (item.country_code || item.iso_code || item.code || '').toUpperCase();
   const region = item.region || item.continent || '';
-  const dataStr = String(item.data || item.data_amount || item.size || '');
+  const dataStr = String(item.data || item.data_amount || item.size || item.allowance || '');
   const dataGb = parseDataGb(dataStr);
   const validityDays = parseInt(item.validity || item.days || item.duration || item.day || '0') || null;
-  const priceRaw = parseFloat(item.price || item.amount || item.cost || '0');
+  const priceRaw = parseFloat(item.price || item.amount || item.cost || item.net_price || '0');
   const currency = (item.currency || 'USD').toUpperCase();
-  const planName = item.title || item.name || `${dataGb === null ? 'Unlimited' : dataGb + 'GB'} / ${validityDays}d`;
 
   if (!country || priceRaw <= 0) return null;
 
   const { price_eur, price_usd } = await toEurUsd(priceRaw, currency);
 
   return {
-    provider: 'saily',
+    provider,
     country,
-    country_code: countryCode.toUpperCase(),
+    country_code: countryCode,
     region,
-    plan_name: planName,
+    plan_name: item.title || item.name || `${dataGb === null ? 'Unlimited' : dataGb + 'GB'} / ${validityDays}d`,
     data_gb: dataGb,
     plan_type: dataGb === null ? 'unlimited' : 'data',
     validity_days: validityDays,
@@ -191,20 +196,11 @@ function parseDataGb(str) {
   return n;
 }
 
-async function autoScroll(page) {
-  await page.evaluate(async () => {
-    await new Promise((resolve) => {
-      let total = 0;
-      const timer = setInterval(() => {
-        window.scrollBy(0, 400);
-        total += 400;
-        if (total >= document.body.scrollHeight - window.innerHeight) {
-          clearInterval(timer);
-          resolve();
-        }
-      }, 150);
-    });
-  });
+function addUnique(allPlans, seen, plans) {
+  for (const p of plans) {
+    const key = `${p.provider}|${p.country_code || p.country}|${p.data_gb}|${p.validity_days}|${p.price_eur}`;
+    if (!seen.has(key)) { seen.add(key); allPlans.push(p); }
+  }
 }
 
 module.exports = { scrape };

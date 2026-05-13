@@ -1,20 +1,12 @@
 /**
  * Airalo scraper (airalo.com)
- * Intercepts the internal REST API that powers their package listings.
- * Airalo uses Next.js; packages are fetched from an internal API at /api/v2/packages.
+ * Strategy: extract __NEXT_DATA__ from country pages (Next.js SSR).
+ * Falls back to capturing XHR responses if __NEXT_DATA__ is empty.
  */
 const { chromium } = require('playwright');
 const { toEurUsd } = require('../currency');
-const axios = require('axios');
 
 const BASE_URL = 'https://www.airalo.com';
-
-// Region slugs to iterate
-const REGIONS = [
-  'africa', 'asia', 'caribbean-islands', 'central-america',
-  'europe', 'middle-east', 'north-america', 'oceania',
-  'south-america',
-];
 
 async function scrape() {
   const browser = await chromium.launch({
@@ -31,110 +23,85 @@ async function scrape() {
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       locale: 'en-US',
       viewport: { width: 1440, height: 900 },
+      extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
     });
 
     const page = await context.newPage();
-    const apiResponses = [];
 
-    // Capture all JSON API calls
-    page.on('response', async (response) => {
-      const url = response.url();
-      const ct = response.headers()['content-type'] || '';
-      if (
-        response.status() === 200 &&
-        ct.includes('json') &&
-        (url.includes('/api/') || url.includes('/_next/') || url.includes('packages') || url.includes('countries'))
-      ) {
+    // Step 1: get country list from the deals / home page
+    console.error('[Airalo] Loading country list...');
+    const capturedJson = [];
+    page.on('response', async (res) => {
+      const ct = res.headers()['content-type'] || '';
+      if (res.status() === 200 && ct.includes('json')) {
         try {
-          const text = await response.text();
-          if (text.includes('"price"') && (text.includes('"country"') || text.includes('"operator"'))) {
-            apiResponses.push({ url, text });
+          const text = await res.text();
+          if (text.length > 500) {
+            console.error(`[Airalo] XHR: ${res.url().substring(0, 100)} (${text.length}b)`);
+            capturedJson.push({ url: res.url(), text });
           }
         } catch (_) {}
       }
     });
 
-    // First try the deals page which loads a broad set of packages
-    console.error('[Airalo] Loading deals page...');
     await page.goto(`${BASE_URL}/esim-deals`, { waitUntil: 'networkidle', timeout: 60000 });
     await page.waitForTimeout(3000);
 
-    // Scroll to trigger lazy-loaded content
-    await autoScroll(page);
-    await page.waitForTimeout(2000);
+    // Extract __NEXT_DATA__ for the listing page (may contain country list)
+    const listingNextData = await extractNextData(page);
+    if (listingNextData) {
+      console.error('[Airalo] Got __NEXT_DATA__ from deals page');
+      const plans = deepSearchPlans(listingNextData, 'airalo');
+      addUnique(allPlans, seen, plans);
+    }
 
-    // Process captured API responses
-    for (const { url, text } of apiResponses) {
+    // Also try XHR responses from listing page
+    for (const { url, text } of capturedJson) {
       try {
-        const json = JSON.parse(text);
-        const plans = parseAiraloResponse(json);
-        for (const p of plans) {
-          const key = `${p.country_code}|${p.data_gb}|${p.validity_days}|${p.price_eur}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            allPlans.push(p);
-          }
-        }
+        const plans = deepSearchPlans(JSON.parse(text), 'airalo');
+        if (plans.length > 0) console.error(`[Airalo] ${plans.length} plans from XHR: ${url.substring(0, 80)}`);
+        addUnique(allPlans, seen, plans);
       } catch (_) {}
     }
 
-    console.error(`[Airalo] After deals page: ${allPlans.length} plans`);
+    // Step 2: collect country page links
+    const countryLinks = await page.$$eval(
+      'a[href*="-esim"]',
+      (els, base) =>
+        [...new Set(
+          els
+            .map((el) => el.href)
+            .filter((h) => h.startsWith(base) && !h.includes('/global') && !h.includes('/deals') && !h.includes('/store') && h !== base + '/' && h !== base)
+        )],
+      BASE_URL
+    );
+    console.error(`[Airalo] Found ${countryLinks.length} country links`);
 
-    // If we didn't get enough, iterate region pages
-    if (allPlans.length < 50) {
-      for (const region of REGIONS) {
-        apiResponses.length = 0;
-        try {
-          await page.goto(`${BASE_URL}/${region}-esim`, { waitUntil: 'networkidle', timeout: 30000 });
-          await page.waitForTimeout(2000);
-          await autoScroll(page);
-          await page.waitForTimeout(1500);
+    // Step 3: visit each country page and extract __NEXT_DATA__
+    for (const href of countryLinks) {
+      capturedJson.length = 0;
+      try {
+        await page.goto(href, { waitUntil: 'networkidle', timeout: 40000 });
+        await page.waitForTimeout(1500);
 
-          for (const { text } of apiResponses) {
-            try {
-              const json = JSON.parse(text);
-              const plans = parseAiraloResponse(json);
-              for (const p of plans) {
-                const key = `${p.country_code}|${p.data_gb}|${p.validity_days}|${p.price_eur}`;
-                if (!seen.has(key)) {
-                  seen.add(key);
-                  allPlans.push(p);
-                }
-              }
-            } catch (_) {}
+        const nd = await extractNextData(page);
+        if (nd) {
+          const plans = deepSearchPlans(nd, 'airalo');
+          if (plans.length > 0) {
+            console.error(`[Airalo] ${plans.length} plans from ${href.split('/').pop()}`);
+            addUnique(allPlans, seen, plans);
           }
-
-          // Also get country links from the region page and visit each
-          const countryLinks = await page.$$eval(
-            'a[href*="-esim"]:not([href*="global"]):not([href*="deals"])',
-            (els) => [...new Set(els.map((el) => el.href))].slice(0, 30)
-          );
-
-          for (const href of countryLinks) {
-            apiResponses.length = 0;
-            try {
-              await page.goto(href, { waitUntil: 'networkidle', timeout: 30000 });
-              await page.waitForTimeout(1500);
-              for (const { text } of apiResponses) {
-                try {
-                  const json = JSON.parse(text);
-                  const plans = parseAiraloResponse(json);
-                  for (const p of plans) {
-                    const key = `${p.country_code}|${p.data_gb}|${p.validity_days}|${p.price_eur}`;
-                    if (!seen.has(key)) {
-                      seen.add(key);
-                      allPlans.push(p);
-                    }
-                  }
-                } catch (_) {}
-              }
-            } catch (_) {}
-          }
-        } catch (err) {
-          console.error(`[Airalo] Region ${region} error: ${err.message}`);
         }
 
-        console.error(`[Airalo] After region ${region}: ${allPlans.length} plans`);
+        // Also check XHR
+        for (const { text } of capturedJson) {
+          try {
+            const plans = deepSearchPlans(JSON.parse(text), 'airalo');
+            addUnique(allPlans, seen, plans);
+          } catch (_) {}
+        }
+      } catch (err) {
+        console.error(`[Airalo] Error on ${href}: ${err.message}`);
       }
     }
   } finally {
@@ -145,85 +112,95 @@ async function scrape() {
   return allPlans;
 }
 
-function parseAiraloResponse(data) {
-  const plans = [];
-  const items = findPackageArray(data);
-  if (!items) return plans;
-
-  for (const item of items) {
-    try {
-      const plan = normalizeAiralo(item);
-      if (plan) plans.push(plan);
-    } catch (_) {}
+async function extractNextData(page) {
+  try {
+    const raw = await page.$eval('#__NEXT_DATA__', (el) => el.textContent);
+    return JSON.parse(raw);
+  } catch (_) {
+    return null;
   }
-  return plans;
 }
 
-function findPackageArray(data) {
-  if (Array.isArray(data)) {
-    if (data.length && isPackage(data[0])) return data;
-  }
-  if (data && typeof data === 'object') {
-    for (const key of ['data', 'packages', 'plans', 'esims', 'items', 'results', 'operators']) {
-      if (Array.isArray(data[key]) && data[key].length && isPackage(data[key][0])) {
-        return data[key];
-      }
-    }
-    // One level deeper
-    for (const v of Object.values(data)) {
-      if (v && typeof v === 'object') {
-        const nested = findPackageArray(v);
-        if (nested) return nested;
-      }
+/**
+ * Recursively search any JSON blob for arrays that look like eSIM plan lists.
+ * Airalo's __NEXT_DATA__ nests packages under props.pageProps or React Query cache.
+ */
+function deepSearchPlans(obj, provider, depth = 0, results = []) {
+  if (depth > 20 || !obj) return results;
+
+  if (Array.isArray(obj) && obj.length > 0 && obj.length < 2000) {
+    const sample = obj[0];
+    if (sample && typeof sample === 'object' && looksLikePlan(sample)) {
+      const plans = obj.map((item) => normalizePlan(item, provider)).filter(Boolean);
+      if (plans.length > 0) results.push(...plans);
+      return results;
     }
   }
-  return null;
+
+  if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+    for (const v of Object.values(obj)) {
+      deepSearchPlans(v, provider, depth + 1, results);
+    }
+  }
+
+  return results;
 }
 
-function isPackage(obj) {
-  if (!obj || typeof obj !== 'object') return false;
+function looksLikePlan(obj) {
   const keys = Object.keys(obj).map((k) => k.toLowerCase());
-  return keys.some((k) => ['price', 'amount', 'net_price'].includes(k));
+  const hasPrice = keys.some((k) =>
+    ['price', 'net_price', 'amount', 'cost', 'retail_price', 'priceincents'].some((pk) => k.includes(pk))
+  );
+  const hasDuration = keys.some((k) =>
+    ['day', 'days', 'validity', 'duration', 'period'].some((dk) => k.includes(dk))
+  );
+  const hasData = keys.some((k) =>
+    ['data', 'gb', 'allowance', 'size', 'bandwidth'].some((dk) => k.includes(dk))
+  );
+  return hasPrice && (hasDuration || hasData);
 }
 
-async function normalizeAiralo(item) {
-  // Airalo package structure
+async function normalizePlan(item, provider) {
+  // Airalo field patterns (may vary by page type)
   const country =
     item.country ||
     item.operator?.country?.title ||
     item.countries?.[0]?.title ||
-    item.location_code ||
+    item.location ||
     '';
   const countryCode =
-    item.country_code ||
-    item.operator?.country?.slug?.toUpperCase() ||
-    item.location_code ||
-    '';
+    (item.country_code || item.operator?.country?.slug || item.iso || '').toUpperCase();
   const region =
     item.operator?.country?.region?.title ||
     item.region?.title ||
     item.region ||
     '';
-  const dataStr = String(item.data || item.amount || '');
+
+  const dataStr = String(item.data || item.allowance || item.amount || '');
   const dataGb = parseDataGb(dataStr);
-  const validityDays = parseInt(item.day || item.validity || item.duration || '0') || null;
-  const planType = item.is_unlimited ? 'unlimited' : dataGb === null ? 'unlimited' : 'data';
 
-  // Price: Airalo typically exposes price in USD
-  const priceUsd = parseFloat(item.price || item.net_price || item.amount_usd || '0');
-  if (!country || priceUsd <= 0) return null;
+  const validityDays =
+    parseInt(item.day || item.days || item.validity || item.duration || '0') || null;
 
-  const { price_eur, price_usd } = await toEurUsd(priceUsd, 'USD');
-  const planName = item.title || `${dataGb === null ? 'Unlimited' : dataGb + 'GB'} / ${validityDays}d`;
+  // Price: Airalo typically returns USD
+  const priceRaw = parseFloat(
+    item.price || item.net_price || item.retail_price || item.priceInCentsUSD / 100 || '0'
+  );
+  const currency = (item.currency || 'USD').toUpperCase();
+  const planName = item.title || item.name || `${dataGb === null ? 'Unlimited' : dataGb + 'GB'} / ${validityDays}d`;
+
+  if (!country || priceRaw <= 0) return null;
+
+  const { price_eur, price_usd } = await toEurUsd(priceRaw, currency);
 
   return {
-    provider: 'airalo',
+    provider,
     country,
-    country_code: countryCode.toUpperCase(),
+    country_code: countryCode,
     region,
     plan_name: planName,
     data_gb: dataGb,
-    plan_type: planType,
+    plan_type: dataGb === null ? 'unlimited' : 'data',
     validity_days: validityDays,
     price_eur,
     price_usd,
@@ -243,21 +220,14 @@ function parseDataGb(str) {
   return n;
 }
 
-async function autoScroll(page) {
-  await page.evaluate(async () => {
-    await new Promise((resolve) => {
-      let totalHeight = 0;
-      const distance = 400;
-      const timer = setInterval(() => {
-        window.scrollBy(0, distance);
-        totalHeight += distance;
-        if (totalHeight >= document.body.scrollHeight - window.innerHeight) {
-          clearInterval(timer);
-          resolve();
-        }
-      }, 150);
-    });
-  });
+function addUnique(allPlans, seen, plans) {
+  for (const p of plans) {
+    const key = `${p.provider}|${p.country_code || p.country}|${p.data_gb}|${p.validity_days}|${p.price_eur}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      allPlans.push(p);
+    }
+  }
 }
 
 module.exports = { scrape };
