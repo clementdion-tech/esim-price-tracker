@@ -2,22 +2,70 @@
  * Holafly scraper (esim.holafly.com)
  *
  * Strategy:
- *  1. Load /shop/ — the full destination listing page.
- *  2. Dismiss cookie banner, scroll to load all lazy country cards.
- *  3. Collect all /esim-[country]/ links (filter out regional/utility pages).
- *  4. For each country page, parse duration + price text patterns.
- *  5. Process 3 pages in parallel.
+ *  1. Fetch product-sitemap.xml — contains all 400+ Holafly country/city pages.
+ *  2. Cross-reference with Airalo country + region slugs to filter out sub-country
+ *     city pages (e.g. esim-chennai, esim-perth) while keeping real countries.
+ *  3. For each matched page, parse duration + price text patterns.
+ *  4. Process 3 pages in parallel.
  *
  * Holafly sells UNLIMITED data plans priced by duration (1d, 3d, 5d, 7d, 10d, 15d, 30d).
  * Prices are shown in the user's currency (USD on GH Actions US servers, GBP on UK IPs).
  */
+const axios = require('axios');
 const { chromium } = require('playwright');
 const { toEurUsd } = require('../currency');
 const { isUtilitySlug, isHolaflyCity } = require('../lib/utils');
 
-const SHOP_URL = 'https://esim.holafly.com/shop/all-destinations/';
 const BASE_URL = 'https://esim.holafly.com';
+const SITEMAP_URL = 'https://esim.holafly.com/product-sitemap.xml';
+const AIRALO_COUNTRIES_API = 'https://www.airalo.com/api/v4/countries';
+const AIRALO_REGIONS_API = 'https://www.airalo.com/api/v4/regions';
 const CONCURRENCY = 3;
+
+/** Fetch all Holafly country pages from sitemap, cross-referenced with Airalo slugs */
+async function getCountryLinks() {
+  // 1. Get Airalo slug list (our source of truth for what counts as a country/region)
+  let allowedSlugs = new Set();
+  try {
+    const [countries, regions] = await Promise.all([
+      axios.get(AIRALO_COUNTRIES_API, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 15000 }),
+      axios.get(AIRALO_REGIONS_API,   { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 15000 }),
+    ]);
+    for (const c of (Array.isArray(countries.data) ? countries.data : [])) {
+      if (c.slug) allowedSlugs.add(c.slug.toLowerCase());
+    }
+    for (const r of (Array.isArray(regions.data) ? regions.data : [])) {
+      if (r.slug) allowedSlugs.add(r.slug.toLowerCase());
+    }
+    console.error(`[Holafly] Airalo reference: ${allowedSlugs.size} slugs`);
+  } catch (err) {
+    console.error(`[Holafly] Airalo API error: ${err.message} — using sitemap only`);
+  }
+
+  // 2. Get all Holafly product pages from sitemap
+  let sitemapUrls = [];
+  try {
+    const r = await axios.get(SITEMAP_URL, { headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 15000 });
+    sitemapUrls = r.data.match(/<loc>(https:\/\/esim\.holafly\.com\/esim-[^<]+)<\/loc>/g)
+      ?.map(m => m.replace(/<\/?loc>/g, '')) || [];
+    console.error(`[Holafly] Sitemap: ${sitemapUrls.length} esim-* pages`);
+  } catch (err) {
+    console.error(`[Holafly] Sitemap error: ${err.message}`);
+  }
+
+  // 3. Filter: keep slugs that are in Airalo's list OR are known regional bundles
+  const links = sitemapUrls.filter(url => {
+    const slug = url.replace(BASE_URL + '/esim-', '').replace(/\/$/, '');
+    if (isUtilitySlug(slug) || isHolaflyCity(slug)) return false;
+    // If we have Airalo reference data, only keep matching slugs
+    if (allowedSlugs.size > 0) return allowedSlugs.has(slug.toLowerCase());
+    // Fallback: exclude obvious city patterns
+    return !/-(city|town|state|province|region|district)$/.test(slug);
+  });
+
+  console.error(`[Holafly] Country links after filter: ${links.length}`);
+  return links;
+}
 
 async function scrape() {
   const browser = await chromium.launch({
@@ -28,6 +76,20 @@ async function scrape() {
   const allPlans = [];
   const seen = new Set();
 
+  // Get country links from sitemap (before opening browser)
+  let countryLinks = [];
+  try {
+    countryLinks = await getCountryLinks();
+  } catch (err) {
+    console.error(`[Holafly] getCountryLinks error: ${err.message}`);
+  }
+
+  if (countryLinks.length === 0) {
+    console.error('[Holafly] No country links — aborting');
+    await browser.close();
+    return [];
+  }
+
   try {
     const context = await browser.newContext({
       userAgent:
@@ -36,54 +98,6 @@ async function scrape() {
       viewport: { width: 1440, height: 900 },
       extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
     });
-
-    // ── Step 1: get country list from /shop/ ──────────────────────────────
-    console.error('[Holafly] Loading shop page...');
-    const listPage = await context.newPage();
-    let countryLinks = [];
-
-    try {
-      await listPage.goto(SHOP_URL, { waitUntil: 'domcontentloaded', timeout: 45000 });
-      await listPage.waitForTimeout(3000);
-
-      // Dismiss cookie banner
-      for (const sel of ['button:has-text("Accept")', 'button:has-text("Got it")', 'button:has-text("Accept all")']) {
-        try { await listPage.click(sel, { timeout: 2000 }); break; } catch (_) {}
-      }
-      await listPage.waitForTimeout(500);
-
-      // Scroll to trigger lazy loading of country cards
-      for (let i = 0; i < 12; i++) {
-        await listPage.evaluate(() => window.scrollBy(0, 600));
-        await listPage.waitForTimeout(300);
-      }
-      await listPage.waitForTimeout(1500);
-
-      const rawLinks = await listPage.evaluate((base) => {
-        return [...new Set(
-          [...document.querySelectorAll('a')]
-            .map(a => a.href.split('?')[0].split('#')[0])
-            .filter(h => h.startsWith(base + '/esim-'))
-        )];
-      }, BASE_URL);
-
-      // Filter out utility/marketing pages server-side (page.evaluate can't call Node modules)
-      countryLinks = rawLinks.filter(h => {
-        const slug = h.replace(BASE_URL + '/esim-', '').replace(/\/$/, '');
-        return !isUtilitySlug(slug) && !isHolaflyCity(slug);
-      });
-
-      console.error(`[Holafly] Found ${countryLinks.length} country links`);
-    } catch (err) {
-      console.error(`[Holafly] Shop page error: ${err.message}`);
-    }
-
-    await listPage.close();
-
-    if (countryLinks.length === 0) {
-      console.error('[Holafly] No country links found — aborting');
-      return [];
-    }
 
     // ── Step 2: scrape each country page in parallel ──────────────────────
     const sampleLimit = process.env.SCRAPE_SAMPLE ? parseInt(process.env.SCRAPE_SAMPLE) : Infinity;
