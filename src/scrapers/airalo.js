@@ -184,15 +184,13 @@ async function extractPackagesFromPage(page, countryName, countrySlug) {
   if (hasUnlimitedTab) {
     try {
       await page.click('[data-testid="segmented-control_tab-unlimited"]');
-      // Wait for the tab to switch — buttons will momentarily disappear then reappear with unlimited plans
-      await page.waitForFunction(
-        () => {
-          const btn = document.querySelector('[data-testid="package-grouped-packages_package-button"]');
-          return btn && /unlimited/i.test(btn.textContent);
-        },
-        { timeout: 8000 }
-      );
-      unlimitedPlans = await extractButtonPlans(page);
+      // Fixed wait — avoids waitForFunction timeout on cloud IPs where rendering is slower.
+      // On UK IP the tab shows same standard plans; on US IP (GH Actions) it shows Unlimited GB.
+      // Either way, extractButtonPlans filters correctly: unlimited=true only when text has "Unlimited".
+      await page.waitForTimeout(3000);
+      const afterTabPlans = await extractButtonPlans(page);
+      // Keep only truly unlimited plans (dataGb === null) to avoid duplicating standard plans
+      unlimitedPlans = afterTabPlans.filter(p => p.dataGb === null);
     } catch (_) {
       // Unlimited tab exists but failed to load — skip gracefully
     }

@@ -212,10 +212,15 @@ async function scrapeCountry(page, country, idx, total) {
 
     await page.goto(country.englishUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-    // Wait for plan cards or timeout — CF may delay hydration on cloud IPs
-    await page.waitForSelector('[data-testid^="destination-hero-plan-card-"]', { timeout: 12000 })
-      .catch(() => {});
-    await page.waitForTimeout(4000);
+    // Wait specifically for DATA plan cards (not card-999=unlimited which says "Unlimited GB"
+    // and would satisfy a generic GB-text check before data cards are ready)
+    await page.waitForFunction(() => {
+      const dataCard = document.querySelector(
+        '[data-testid^="destination-hero-plan-card-"]:not([data-testid="destination-hero-plan-card-999"])'
+      );
+      return dataCard && /\dG[Bb]/.test(dataCard.innerText || '');
+    }, { timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(2000);
 
     // ── Strategy A: parse raw SSR HTML (works when JS hydration is blocked) ──
     let dataPlans = rawHtml ? extractPlansFromHtml(rawHtml) : [];
