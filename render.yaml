@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: esim-price-tracker
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: SLACK_WEBHOOK_URL
+        sync: false
+      - key: SLACK_CHANNEL_ID
+        value: C0B3ADU71B5

@@ -1,0 +1,26 @@
+{
+  "name": "esim-price-tracker",
+  "version": "1.0.0",
+  "description": "eSIM pricing comparison dashboard — Kolet vs competitors",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "scrape": "node src/scrapers/index.js",
+    "scrape:kolet": "node src/scrapers/index.js --only=kolet",
+    "scrape:airalo": "node src/scrapers/index.js --only=airalo",
+    "scrape:saily": "node src/scrapers/index.js --only=saily",
+    "scrape:holafly": "node src/scrapers/index.js --only=holafly",
+    "dev": "nodemon src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "express": "^4.19.0",
+    "playwright": "^1.44.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
