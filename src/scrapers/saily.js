@@ -207,7 +207,8 @@ async function scrape() {
             // Resolve country name from URL slug
             const slug = href.replace(/\/$/, '').split('/').pop() || '';
             const countryName = slug
-              .replace(/-esim.*$/, '')
+              .replace(/^esim-/, '')   // /esim-spain → spain
+              .replace(/-esim.*$/, '') // /spain-esim → spain
               .replace(/-/g, ' ')
               .replace(/\b\w/g, (c) => c.toUpperCase());
 
