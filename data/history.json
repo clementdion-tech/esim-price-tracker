@@ -1,4 +1,180 @@
 {
   "changes": [],
-  "new_countries": []
+  "new_countries": [
+    {
+      "detected_at": "2026-05-13T13:14:14.374Z",
+      "provider": "airalo",
+      "country": "Guam",
+      "country_code": "GUA",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.375Z",
+      "provider": "airalo",
+      "country": "Africa",
+      "country_code": "AFR",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.375Z",
+      "provider": "airalo",
+      "country": "Africa Safari",
+      "country_code": "AFR",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.375Z",
+      "provider": "airalo",
+      "country": "Asia",
+      "country_code": "ASI",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.375Z",
+      "provider": "airalo",
+      "country": "Caribbean Islands",
+      "country_code": "CAR",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.375Z",
+      "provider": "airalo",
+      "country": "Europe",
+      "country_code": "EUR",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.375Z",
+      "provider": "airalo",
+      "country": "European Union and United Kingdom",
+      "country_code": "EU-",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.376Z",
+      "provider": "airalo",
+      "country": "Latin America",
+      "country_code": "LAT",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.376Z",
+      "provider": "airalo",
+      "country": "Middle East and North Africa",
+      "country_code": "MID",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.376Z",
+      "provider": "airalo",
+      "country": "North America",
+      "country_code": "NOR",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.376Z",
+      "provider": "airalo",
+      "country": "Oceania",
+      "country_code": "OCE",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.376Z",
+      "provider": "saily",
+      "country": "Africa",
+      "country_code": "",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.376Z",
+      "provider": "saily",
+      "country": "Asia And Oceania",
+      "country_code": "",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.376Z",
+      "provider": "saily",
+      "country": "Caribbean Islands",
+      "country_code": "",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.376Z",
+      "provider": "saily",
+      "country": "Europe",
+      "country_code": "EU",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.376Z",
+      "provider": "saily",
+      "country": "Global",
+      "country_code": "",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.376Z",
+      "provider": "saily",
+      "country": "Latin America",
+      "country_code": "",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.376Z",
+      "provider": "saily",
+      "country": "Middle East And North Africa",
+      "country_code": "",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.377Z",
+      "provider": "saily",
+      "country": "North America",
+      "country_code": "",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.377Z",
+      "provider": "holafly",
+      "country": "Europe",
+      "country_code": "",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.377Z",
+      "provider": "holafly",
+      "country": "Asia",
+      "country_code": "",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.377Z",
+      "provider": "holafly",
+      "country": "Africa",
+      "country_code": "",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.377Z",
+      "provider": "holafly",
+      "country": "Caribbean",
+      "country_code": "",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.377Z",
+      "provider": "holafly",
+      "country": "Middle East",
+      "country_code": "",
+      "region": ""
+    },
+    {
+      "detected_at": "2026-05-13T13:14:14.377Z",
+      "provider": "holafly",
+      "country": "Oceania",
+      "country_code": "",
+      "region": ""
+    }
+  ]
 }
