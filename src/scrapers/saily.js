@@ -123,8 +123,8 @@ async function scrape() {
           }
 
           const slug = path.replace(/^\/esim-/, '').replace(/\/$/, '');
-          // Skip sub-pages and non-plan utility/marketing pages
-          if (slug.includes('/') || isUtilitySlug(slug)) continue;
+          // Skip sub-pages only — utility filter applied in Node.js after evaluate()
+          if (slug.includes('/')) continue;
 
           const countryName = slug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
           // Always use the explicit /en/ locale URL to avoid locale redirect contamination
@@ -137,6 +137,9 @@ async function scrape() {
           return true;
         });
       }, BASE_URL);
+
+      // Apply utility/marketing page filter in Node.js context (can't use module inside page.evaluate)
+      countries = countries.filter(c => !isUtilitySlug(c.slug));
 
       if (countries.length === 0 && listHtml) {
         console.error('[Saily] DOM parse failed — falling back to raw HTML country extraction');
