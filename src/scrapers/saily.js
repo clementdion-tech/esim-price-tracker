@@ -1,15 +1,18 @@
 /**
  * Saily scraper (saily.com)
- * Strategy: DOM scraping via Playwright.
- * 1. Load /store (destination listing page) with domcontentloaded + explicit wait.
- * 2. Extract all country page links.
- * 3. Visit each country page and parse plan cards from the rendered DOM.
- * 4. Process up to 3 country pages in parallel.
+ *
+ * Strategy:
+ *  1. Load saily.com/fr/all-destinations/ — lists 200+ countries with ISO codes.
+ *  2. For each country, visit saily.com/esim-[slug]/ (English page).
+ *  3. Parse plan cards via data-testid="destination-hero-plan-card-*".
+ *  4. For unlimited plans, iterate duration options to capture all prices.
+ *  5. Process 3 pages in parallel.
  */
 const { chromium } = require('playwright');
 const { toEurUsd } = require('../currency');
 
 const BASE_URL = 'https://saily.com';
+const ALL_DESTINATIONS = 'https://saily.com/fr/all-destinations/';
 const CONCURRENCY = 3;
 
 async function scrape() {
@@ -27,220 +30,72 @@ async function scrape() {
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       locale: 'en-US',
       viewport: { width: 1440, height: 900 },
-      extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
     });
 
-    // ── Step 1: collect country links ──────────────────────────────────────
-    console.error('[Saily] Loading destination list...');
+    // ── Step 1: get full country list from all-destinations ────────────────
+    console.error('[Saily] Loading all-destinations...');
     const listPage = await context.newPage();
+    let countries = [];
 
-    let countryLinks = [];
+    try {
+      await listPage.goto(ALL_DESTINATIONS, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await listPage.waitForTimeout(5000);
 
-    // Try multiple listing entry-points; stop at the first that yields links
-    const listingPaths = ['/store', '/', '/esim', '/destinations'];
-    for (const path of listingPaths) {
-      try {
-        await listPage.goto(`${BASE_URL}${path}`, {
-          waitUntil: 'domcontentloaded',
-          timeout: 45000,
-        });
-        // Give React time to hydrate
-        await listPage.waitForTimeout(6000);
+      countries = await listPage.evaluate((base) => {
+        const results = [];
+        const links = [...document.querySelectorAll('a')];
+        for (const el of links) {
+          const href = (el.href || '').split('?')[0].split('#')[0];
+          // Saily country links: saily.com/fr/esim-[country]/ or saily.com/esim-[country]/
+          if (!href.startsWith(base)) continue;
+          const path = href.replace(base, '').replace(/^\/[a-z]{2}\//, '/'); // strip /fr/ locale
+          if (!path.match(/^\/esim-[a-z]/)) continue;
 
-        // Try waiting for any anchor that looks like a country destination
-        try {
-          await listPage.waitForSelector('a[href*="/store/"], a[href*="-esim"], a[href*="/esim/"]', {
-            timeout: 10000,
-          });
-        } catch (_) { /* selector may not exist on this path */ }
+          // ISO code is in the nearest ancestor/sibling [data-testid] with a 2-letter value
+          let isoCode = '';
+          let node = el;
+          for (let d = 0; d < 8 && node; d++) {
+            const tid = node.getAttribute('data-testid') || '';
+            if (tid.match(/^[A-Z]{2}$/)) { isoCode = tid; break; }
+            node = node.parentElement;
+          }
 
-        countryLinks = await listPage.$$eval(
-          'a',
-          (els, base) => {
-            const valid = [];
-            for (const el of els) {
-              const href = el.href || '';
-              if (!href.startsWith(base)) continue;
-              const path = href.replace(base, '').split('?')[0].split('#')[0];
-              // Must be a meaningful sub-path, not root, not top-level nav links
-              if (
-                path.length < 4 ||
-                path === '/' ||
-                /^\/(store|esim|destinations|blog|faq|about|contact|terms|privacy|support|help)\/?$/.test(path)
-              ) continue;
-              // Accept paths that look like /store/country-esim or /esim-country or /[country]
-              if (
-                href.includes('/store/') ||
-                href.includes('-esim') ||
-                href.includes('/esim-') ||
-                /\/[a-z]{2,}\/?$/.test(path)
-              ) {
-                valid.push(href.split('?')[0].split('#')[0]);
-              }
-            }
-            return [...new Set(valid)].slice(0, 250);
-          },
-          BASE_URL
-        );
+          const slug = path.replace(/^\/esim-/, '').replace(/\/$/, '');
+          const countryName = slug.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 
-        if (countryLinks.length > 5) {
-          console.error(`[Saily] Found ${countryLinks.length} country links from ${path}`);
-          break;
+          results.push({ slug, countryName, isoCode, englishUrl: `${base}/esim-${slug}/` });
         }
-      } catch (err) {
-        console.error(`[Saily] Listing ${path} error: ${err.message}`);
-      }
+        // Deduplicate by slug
+        const seen = new Set();
+        return results.filter(c => { if (seen.has(c.slug)) return false; seen.add(c.slug); return true; });
+      }, BASE_URL);
+
+      console.error(`[Saily] Found ${countries.length} countries`);
+    } catch (err) {
+      console.error(`[Saily] all-destinations error: ${err.message}`);
     }
 
     await listPage.close();
-    console.error(`[Saily] Processing ${countryLinks.length} country pages...`);
 
-    // ── Step 2: scrape each country page in parallel chunks ───────────────
-    for (let i = 0; i < countryLinks.length; i += CONCURRENCY) {
-      const chunk = countryLinks.slice(i, i + CONCURRENCY);
+    if (countries.length === 0) {
+      console.error('[Saily] No countries found — aborting');
+      return [];
+    }
+
+    // ── Step 2: scrape each country page ──────────────────────────────────
+    for (let i = 0; i < countries.length; i += CONCURRENCY) {
+      const chunk = countries.slice(i, i + CONCURRENCY);
+
       await Promise.all(
-        chunk.map(async (href) => {
+        chunk.map(async (country, j) => {
+          const idx = i + j + 1;
           const page = await context.newPage();
           try {
-            await page.goto(href, { waitUntil: 'domcontentloaded', timeout: 35000 });
-
-            // Wait for plan cards to appear — try several selector patterns
-            const planSelectors = [
-              '[data-testid*="package"]',
-              '[data-testid*="plan"]',
-              '[data-testid*="card"]',
-              '[class*="package"]',
-              '[class*="plan-card"]',
-              '[class*="PlanCard"]',
-              '[class*="PackageCard"]',
-              '[class*="offer"]',
-              // generic: any element containing "GB" and a price symbol nearby
-            ];
-            let selectorHit = false;
-            for (const sel of planSelectors) {
-              try {
-                await page.waitForSelector(sel, { timeout: 5000 });
-                selectorHit = true;
-                break;
-              } catch (_) { /* try next */ }
+            const plans = await scrapeCountry(page, country, idx, countries.length);
+            for (const p of plans) {
+              const key = `saily|${p.country_code || p.country}|${p.data_gb}|${p.validity_days}|${p.price_eur}`;
+              if (!seen.has(key)) { seen.add(key); allPlans.push(p); }
             }
-            if (!selectorHit) {
-              // Fall back to a plain wait; content may still be there
-              await page.waitForTimeout(5000);
-            }
-
-            // Extract plan data from the rendered DOM
-            const rawPlans = await page.evaluate(() => {
-              const results = [];
-
-              // ── Strategy A: structured card elements ──────────────────
-              // Look for containers that hold a GB amount, validity, and price together
-              const cardCandidates = [
-                ...document.querySelectorAll('[data-testid*="package"], [data-testid*="plan"], [data-testid*="card"]'),
-                ...document.querySelectorAll('[class*="package"], [class*="PackageCard"], [class*="PlanCard"], [class*="plan-card"]'),
-                ...document.querySelectorAll('[class*="offer-card"], [class*="OfferCard"], [class*="data-plan"]'),
-              ];
-              // Deduplicate by reference
-              const unique = [...new Set(cardCandidates)];
-
-              for (const card of unique) {
-                const text = (card.innerText || card.textContent || '').replace(/\s+/g, ' ').trim();
-                if (!text) continue;
-
-                // Need both a data marker and a price
-                const dataMatch = text.match(/(\d+(?:\.\d+)?)\s*GB/i) ||
-                                  text.match(/\b(unlimited|∞)\b/i);
-                const priceMatch = text.match(/[\$€£]\s*(\d+(?:[.,]\d+)?)/) ||
-                                   text.match(/(\d+(?:[.,]\d+)?)\s*[\$€£]/);
-                const daysMatch = text.match(/(\d+)\s*(?:day|days|Day|Days)/);
-
-                if ((dataMatch || text.toLowerCase().includes('unlimited')) && priceMatch) {
-                  const dataStr = dataMatch ? dataMatch[0] : 'Unlimited';
-                  const priceStr = priceMatch[1].replace(',', '.');
-                  const daysStr = daysMatch ? daysMatch[1] : null;
-                  // Determine currency symbol used
-                  const currencySymbol = (priceMatch[0].includes('€') ? 'EUR' : 'USD');
-                  results.push({
-                    dataStr,
-                    price: parseFloat(priceStr),
-                    days: daysStr ? parseInt(daysStr) : null,
-                    currency: currencySymbol,
-                    source: 'card',
-                  });
-                }
-              }
-
-              // ── Strategy B: page-text regex scan (fallback) ───────────
-              if (results.length === 0) {
-                const bodyText = document.body.innerText || '';
-                // Match patterns like:  1 GB  7 Days  $4.99
-                // or: $4.99  1GB  7 days
-                const lineRegex =
-                  /(\d+(?:\.\d+)?)\s*GB[\s\S]{0,60}?(\d+)\s*(?:day|days)[\s\S]{0,30}?[\$€£]\s*(\d+(?:[.,]\d+)?)/gi;
-                let m;
-                while ((m = lineRegex.exec(bodyText)) !== null) {
-                  results.push({
-                    dataStr: m[1] + 'GB',
-                    days: parseInt(m[2]),
-                    price: parseFloat(m[3].replace(',', '.')),
-                    currency: m[0].includes('€') ? 'EUR' : 'USD',
-                    source: 'regex',
-                  });
-                }
-                // Unlimited pattern
-                const unlimRegex =
-                  /unlimited[\s\S]{0,60}?(\d+)\s*(?:day|days)[\s\S]{0,30}?[\$€£]\s*(\d+(?:[.,]\d+)?)/gi;
-                while ((m = unlimRegex.exec(bodyText)) !== null) {
-                  results.push({
-                    dataStr: 'Unlimited',
-                    days: parseInt(m[1]),
-                    price: parseFloat(m[2].replace(',', '.')),
-                    currency: m[0].includes('€') ? 'EUR' : 'USD',
-                    source: 'regex-unlimited',
-                  });
-                }
-              }
-
-              return results;
-            });
-
-            // Resolve country name from URL slug
-            const slug = href.replace(/\/$/, '').split('/').pop() || '';
-            const countryName = slug
-              .replace(/^esim-/, '')   // /esim-spain → spain
-              .replace(/-esim.*$/, '') // /spain-esim → spain
-              .replace(/-/g, ' ')
-              .replace(/\b\w/g, (c) => c.toUpperCase());
-
-            const plans = [];
-
-            for (const raw of rawPlans) {
-              if (!raw.price || raw.price <= 0) continue;
-
-              const dataGb = parseDataGb(raw.dataStr);
-              const validityDays = raw.days || null;
-              const { price_eur, price_usd } = await toEurUsd(raw.price, raw.currency || 'USD');
-
-              plans.push({
-                provider: 'saily',
-                country: countryName,
-                country_code: '',
-                region: '',
-                plan_name: `${dataGb === null ? 'Unlimited' : dataGb + 'GB'} / ${validityDays ? validityDays + 'd' : '?'}`,
-                data_gb: dataGb,
-                plan_type: dataGb === null ? 'unlimited' : 'data',
-                validity_days: validityDays,
-                price_eur,
-                price_usd,
-              });
-            }
-
-            const totalSoFar = i + chunk.indexOf(href) + 1;
-            console.error(`[Saily] [${totalSoFar}/${countryLinks.length}] ${countryName} — ${plans.length} plans`);
-
-            addUnique(allPlans, seen, plans);
-          } catch (err) {
-            console.error(`[Saily] Error on ${href}: ${err.message}`);
           } finally {
             await page.close();
           }
@@ -255,29 +110,127 @@ async function scrape() {
   return allPlans;
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+async function scrapeCountry(page, country, idx, total) {
+  try {
+    await page.goto(country.englishUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-function parseDataGb(str) {
-  if (!str) return null;
-  const s = str.toLowerCase().trim();
-  if (s.includes('unlimited') || s === '∞') return null;
-  const m = s.match(/(\d+(?:\.\d+)?)\s*(gb|mb|tb)/i);
-  if (!m) return null;
-  const n = parseFloat(m[1]);
-  const unit = m[2].toLowerCase();
-  if (unit === 'mb') return Math.round((n / 1024) * 100) / 100;
-  if (unit === 'tb') return n * 1024;
-  return n;
+    // Wait for plan cards
+    try {
+      await page.waitForSelector('[data-testid^="destination-hero-plan-card-"]', { timeout: 10000 });
+    } catch {
+      console.error(`[Saily] [${idx}/${total}] ${country.countryName} — no plan cards`);
+      return [];
+    }
+
+    // Extract data plans (testid = card-1, card-3, card-5, card-10, card-20 etc.)
+    const dataPlans = await page.evaluate(() => {
+      const cards = [...document.querySelectorAll('[data-testid^="destination-hero-plan-card-"]')]
+        .filter(el => {
+          const tid = el.getAttribute('data-testid') || '';
+          return tid !== 'destination-hero-plan-card-999'; // unlimited handled separately
+        });
+
+      return cards.map(card => {
+        const text = (card.innerText || card.textContent || '').replace(/\s+/g, ' ').trim();
+        const gbMatch = text.match(/(\d+(?:\.\d+)?)\s*GB/i);
+        const daysMatch = text.match(/(\d+)\s*days?/i);
+        const priceMatch = text.match(/US\$\s*(\d+(?:[.,]\d+)?)/) || text.match(/\$\s*(\d+(?:[.,]\d+)?)/);
+        if (!gbMatch || !priceMatch) return null;
+        return {
+          dataGb: parseFloat(gbMatch[1]),
+          validityDays: daysMatch ? parseInt(daysMatch[1]) : null,
+          price: parseFloat(priceMatch[1].replace(',', '.')),
+          currency: 'USD',
+        };
+      }).filter(Boolean);
+    });
+
+    // Extract unlimited plan durations by clicking each option
+    const unlimitedPlans = await scrapeUnlimitedPlans(page);
+
+    const allRaw = [...dataPlans, ...unlimitedPlans];
+    if (allRaw.length === 0) {
+      console.error(`[Saily] [${idx}/${total}] ${country.countryName} — 0 plans`);
+      return [];
+    }
+
+    const plans = await Promise.all(
+      allRaw.map(async (raw) => {
+        const { price_eur, price_usd } = await toEurUsd(raw.price, raw.currency);
+        return {
+          provider: 'saily',
+          country: country.countryName,
+          country_code: country.isoCode,
+          region: '',
+          plan_name: `${raw.dataGb === null ? 'Unlimited' : raw.dataGb + 'GB'} / ${raw.validityDays}d`,
+          data_gb: raw.dataGb,
+          plan_type: raw.dataGb === null ? 'unlimited' : 'data',
+          validity_days: raw.validityDays,
+          price_eur,
+          price_usd,
+        };
+      })
+    );
+
+    console.error(`[Saily] [${idx}/${total}] ${country.countryName} — ${plans.length} plans`);
+    return plans;
+  } catch (err) {
+    console.error(`[Saily] [${idx}/${total}] ${country.countryName} error: ${err.message}`);
+    return [];
+  }
 }
 
-function addUnique(allPlans, seen, plans) {
-  for (const p of plans) {
-    const key = `${p.provider}|${p.country_code || p.country}|${p.data_gb}|${p.validity_days}|${p.price_eur}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      allPlans.push(p);
+async function scrapeUnlimitedPlans(page) {
+  const plans = [];
+  try {
+    const unlimCard = await page.$('[data-testid="destination-hero-plan-card-999"]');
+    if (!unlimCard) return plans;
+
+    // Get all duration options
+    const options = await page.$$('[data-testid="unlimited-plan-duration-select"] [role="option"], [data-testid="unlimited-plan-duration-select"] option');
+    const optionIds = await page.evaluate(() => {
+      // Get the sibling radio/button options for duration selection
+      const sel = document.querySelector('[data-testid="unlimited-plan-duration-select"]');
+      if (!sel) return [];
+      const items = [...sel.querySelectorAll('[data-testid]')];
+      return items.map(el => ({ testid: el.getAttribute('data-testid'), text: el.innerText.trim() }));
+    });
+
+    if (optionIds.length === 0) {
+      // Just read the current price
+      const text = await page.evaluate(() => {
+        const card = document.querySelector('[data-testid="destination-hero-plan-card-999"]');
+        return card ? (card.innerText || '').replace(/\s+/g, ' ') : '';
+      });
+      const priceMatch = text.match(/US\$\s*(\d+(?:[.,]\d+)?)/) || text.match(/\$\s*(\d+(?:[.,]\d+)?)/);
+      const daysMatch = text.match(/(\d+)\s*days?/i);
+      if (priceMatch && daysMatch) {
+        plans.push({ dataGb: null, validityDays: parseInt(daysMatch[1]), price: parseFloat(priceMatch[1]), currency: 'USD' });
+      }
+      return plans;
     }
-  }
+
+    // Click each option and read price
+    for (const opt of optionIds) {
+      try {
+        const daysMatch = opt.text.match(/(\d+)/);
+        if (!daysMatch) continue;
+        await page.click(`[data-testid="${opt.testid}"]`);
+        await page.waitForTimeout(300);
+        const price = await page.evaluate(() => {
+          const card = document.querySelector('[data-testid="destination-hero-plan-card-999"]');
+          if (!card) return null;
+          const text = card.innerText || '';
+          const m = text.match(/US\$\s*(\d+(?:[.,]\d+)?)/) || text.match(/\$\s*(\d+(?:[.,]\d+)?)/);
+          return m ? parseFloat(m[1].replace(',', '.')) : null;
+        });
+        if (price && price > 0) {
+          plans.push({ dataGb: null, validityDays: parseInt(daysMatch[1]), price, currency: 'USD' });
+        }
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return plans;
 }
 
 module.exports = { scrape };
