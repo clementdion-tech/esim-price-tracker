@@ -133,6 +133,7 @@ async function scrapeCountryPage(page, country, idx, total) {
           price: raw.price,
           currency: raw.currency,
           isRegional: country.isRegional || false,
+          planType: raw.planType || null,
         })
       )
     );
@@ -190,7 +191,20 @@ async function extractPackagesFromPage(page, countryName, countrySlug) {
     }
   }
 
-  return [...standardPlans, ...unlimitedPlans];
+  // Check for voice+SMS plans tab
+  const hasVoiceTab = await page.$('[data-testid="segmented-control_tab-data-voice"]') !== null;
+  let voicePlans = [];
+  if (hasVoiceTab) {
+    try {
+      await page.click('[data-testid="segmented-control_tab-data-voice"]');
+      await page.waitForTimeout(3000);
+      const afterVoicePlans = await extractButtonPlans(page);
+      // Tag as voice_data type
+      voicePlans = afterVoicePlans.map(p => ({ ...p, planType: 'voice_data' }));
+    } catch (_) {}
+  }
+
+  return [...standardPlans, ...unlimitedPlans, ...voicePlans];
 }
 
 /** Extracts all package button plans from the currently visible tab. Sync-safe. */

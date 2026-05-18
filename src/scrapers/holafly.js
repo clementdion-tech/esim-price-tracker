@@ -122,6 +122,23 @@ async function scrape() {
     await browser.close();
   }
 
+  // Scrape the new subscription plans (/plans/ page — global coverage)
+  try {
+    const ctx2 = await browser.newContext({
+      userAgent:
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      locale: 'en-US',
+      viewport: { width: 1440, height: 900 },
+      extraHTTPHeaders: { 'Accept-Language': 'en-US,en;q=0.9' },
+    });
+    const subPage = await ctx2.newPage();
+    const subPlans = await scrapeSubscriptionPlans(subPage);
+    addUnique(allPlans, seen, subPlans);
+    await ctx2.close();
+  } catch (err) {
+    console.error('[Holafly] Subscription plans error:', err.message);
+  }
+
   console.error(`[Holafly] Total: ${allPlans.length} plans`);
   return allPlans;
 }
@@ -161,16 +178,15 @@ async function scrapeCountry(page, href, idx, total) {
         }
       }
 
-      // Pattern B: "N days … PRICE" within 80 chars (fallback)
-      if (results.length === 0) {
-        const fwd = /(\d+)\s*days?[\s\S]{0,80}?([£$€])\s*(\d+(?:[.,]\d+)?)/gi;
-        while ((m = fwd.exec(text)) !== null) {
-          const price = parseFloat(m[3].replace(',', '.'));
-          if (price > 0) results.push({ days: parseInt(m[1]), price, currency: m[2] === '£' ? 'GBP' : m[2] === '$' ? 'USD' : 'EUR' });
-        }
+      // Pattern B: broader match — ALWAYS run to catch the 1-day pass and other edge cases
+      // "1 day\n\n1 eSIM\n\n€ 3.79" lives in a separate section above the duration table
+      const fwd = /(\d+)\s*days?[\s\S]{0,80}?([£$€])\s*(\d+(?:[.,]\d+)?)/gi;
+      while ((m = fwd.exec(text)) !== null) {
+        const price = parseFloat(m[3].replace(',', '.'));
+        if (price > 0) results.push({ days: parseInt(m[1]), price, currency: m[2] === '£' ? 'GBP' : m[2] === '$' ? 'USD' : 'EUR' });
       }
 
-      // Deduplicate by (days, price)
+      // Deduplicate by (days, price) — Pattern B may re-find what Pattern A already found
       const seen = new Set();
       return results.filter(r => {
         const k = `${r.days}|${r.price}`;
@@ -204,6 +220,78 @@ async function scrapeCountry(page, href, idx, total) {
     return plans;
   } catch (err) {
     console.error(`[Holafly] [${idx}/${total}] ${countryName} error: ${err.message}`);
+    return [];
+  }
+}
+
+/**
+ * Scrape Holafly's global subscription plans from esim.holafly.com/plans/
+ * Returns plans with plan_type: 'subscription', country: 'Global', validity_days: 30.
+ *
+ * Current tiers (as of 2025):
+ *   Light     — 25 GB,     €45.95/month
+ *   Unlimited — unlimited, €59.95/month
+ */
+async function scrapeSubscriptionPlans(page) {
+  const url = 'https://esim.holafly.com/plans/';
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(4000);
+
+    const rawPlans = await page.evaluate(() => {
+      const text = document.body.innerText || '';
+      const results = [];
+
+      // Match plan tiers: "Light … €45.95" or "Unlimited … €59.95"
+      // Also accept USD prices ($) from US-IP rendering
+      const tierRegex = /(light|unlimited)\b[\s\S]{0,200}?([£$€])\s*(\d+(?:[.,]\d+)?)/gi;
+      let m;
+      const seen = new Set();
+      while ((m = tierRegex.exec(text)) !== null) {
+        const tierRaw = m[1].toLowerCase();
+        const sym = m[2];
+        const price = parseFloat(m[3].replace(',', '.'));
+        if (price <= 0) continue;
+        const currency = sym === '£' ? 'GBP' : sym === '$' ? 'USD' : 'EUR';
+        const key = `${tierRaw}|${price}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        results.push({
+          tier: tierRaw,
+          price,
+          currency,
+          dataGb: tierRaw === 'unlimited' ? null : 25,
+        });
+      }
+      return results;
+    });
+
+    if (rawPlans.length === 0) {
+      console.error('[Holafly] Subscription plans: 0 plans found');
+      return [];
+    }
+
+    const plans = await Promise.all(
+      rawPlans.map((raw) =>
+        buildPlan({
+          provider: 'holafly',
+          country: 'Global',
+          country_code: '',
+          region: '',
+          dataGb: raw.dataGb,
+          validityDays: 30,
+          price: raw.price,
+          currency: raw.currency,
+          planType: 'subscription',
+          planName: (raw.tier === 'unlimited' ? 'Unlimited' : '25GB') + ' / 30d (subscription)',
+        })
+      )
+    );
+
+    console.error(`[Holafly] Subscription plans: ${plans.length} plans`);
+    return plans;
+  } catch (err) {
+    console.error(`[Holafly] scrapeSubscriptionPlans error: ${err.message}`);
     return [];
   }
 }

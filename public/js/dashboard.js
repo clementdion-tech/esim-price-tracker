@@ -322,9 +322,11 @@ function buildTable(countryCode, specs, changeIndex) {
     <th class="currency-header${p === 'kolet' ? ' th-kolet' : ''}">USD</th>`).join('');
 
   const TYPE_BADGES = {
-    data:      '<span class="badge-pill badge-data">Data</span>',
-    unlimited: '<span class="badge-pill badge-unlimited">Unlimited</span>',
-    daily:     '<span class="badge-pill badge-daily">Daily</span>',
+    data:         '<span class="badge-pill badge-data">Data</span>',
+    unlimited:    '<span class="badge-pill badge-unlimited">Unlimited</span>',
+    daily:        '<span class="badge-pill badge-daily">Daily</span>',
+    voice_data:   '<span class="badge-pill badge-voice-data">Voice+Data</span>',
+    subscription: '<span class="badge-pill badge-subscription">Subscription</span>',
   };
 
   // Build a lookup: validity_days → holafly unlimited price (for reference in data rows)

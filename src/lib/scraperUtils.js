@@ -69,6 +69,7 @@ function addUnique(allPlans, seen, plans) {
  * @param {string}  raw.currency       — 'USD' | 'EUR' | 'GBP'
  * @param {string}  [raw.planName]     — override auto-generated plan_name
  * @param {boolean} [raw.isRegional]   — true for regional/multi-country bundles
+ * @param {string}  [raw.planType]    — override plan_type (e.g. 'voice_data', 'subscription')
  *
  * @returns {Promise<object>} Normalised plan object with price_eur and price_usd.
  */
@@ -87,7 +88,7 @@ async function buildPlan(raw) {
     region: raw.region || '',
     plan_name: planName,
     data_gb: dataGb,
-    plan_type: dataGb === null ? 'unlimited' : 'data',
+    plan_type: raw.planType || (dataGb === null ? 'unlimited' : 'data'),
     is_regional: raw.isRegional || false,
     validity_days: raw.validityDays,
     price_eur,
